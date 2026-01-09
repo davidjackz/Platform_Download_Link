@@ -1,0 +1,26 @@
+{
+  "dependencies": {
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "ejs": "^3.1.10",
+    "express": "^5.2.1",
+    "node-telegram-bot-api": "^0.67.0",
+    "socket.io": "^4.8.3",
+    "uuid": "^13.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  },
+  "name": "node-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "bot.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
