@@ -86,12 +86,11 @@ I remove watermarks and let you download videos in HD.
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "📊 Live Dashboard", url: domain }],
               [
                 { text: "👨‍💻 Source Code", url: "https://github.com/lorndavid/botdownloadtiktok" },
                 { text: "💬 Contact Me", url: "https://t.me/Tutuvid" },
               ],
-              [{ text: "☕ Buy Me A Coffee", url: "https://t.me/Tutuvid" }],
+              [{ text: "☕ Buy Me A Coffee", url: "https://link.payway.com.kh/ABAPAYFB405176Y" }],
             ],
           },
         });
@@ -110,6 +109,12 @@ I remove watermarks and let you download videos in HD.
     // Command: /source
     if (text === "/source" || text === "/github") {
       await bot.sendMessage(chatId, "👨‍💻 **Open Source:**\n\nStar the repo here:\nhttps://github.com/lorndavid/botdownloadtiktok");
+      return;
+    }
+
+    //Command: Buy Me A Coffee
+    if (text === "/donate"){
+      await bot.sendMessage(chatId, "Help me but a coffee to do more open source code !!\n\n click now: https://link.payway.com.kh/ABAPAYFB405176Y ");
       return;
     }
 
