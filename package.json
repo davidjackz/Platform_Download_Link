@@ -9,18 +9,26 @@
     "socket.io": "^4.8.3",
     "uuid": "^13.0.0"
   },
-  "scripts": {
+ "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
   },
-  "name": "node-bot",
+  "name": "bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "A high-performance **Telegram Bot** that downloads TikTok videos **without watermarks**.  \r It features a **real-time web dashboard**, handles **large files via streaming**, and includes a **Cyberpunk-style UI**.",
   "main": "bot.js",
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davidjackz0505-arch/botdownloadtiktok.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davidjackz0505-arch/botdownloadtiktok/issues"
+  },
+  "homepage": "https://github.com/davidjackz0505-arch/botdownloadtiktok#readme"
 }
