@@ -1,26 +1,70 @@
-// bot.js
 const TelegramBot = require("node-telegram-bot-api");
+const { BakongKHQR, khqrData } = require("bakong-khqr");
+const QRCode = require("qrcode");
+const { createCanvas, loadImage } = require("canvas");
 const { getTikTokData } = require("./downloader");
+const User = require("./models/User");
+require("dotenv").config();
+
+// CONFIG
+const BAKONG_ACCOUNT = process.env.BAKONG_ACCOUNT_ID;
+const MERCHANT_NAME = process.env.MERCHANT_NAME || "Lorn David";
+const PAYWAY_LINK = "https://link.payway.com.kh/ABAPAYFB405176Y";
 
 // Global State
-const state = {
-  stats: { downloads: 0, total_users: 0, bytes_processed: 0 },
-  userList: [],
-};
+const state = { stats: { downloads: 0, total_users: 0 }, userList: [] };
 
-// 🛡️ HELPER: Fixes names/titles that break Telegram
-const escapeMarkdown = (text) => {
-  if (!text) return "";
-  return text.replace(/[_*[\]()~>#+=|{}.!-]/g, "\\$&");
-};
+// Helper: Escape Markdown
+const escapeMarkdown = (text) =>
+  text ? text.replace(/[_*[\]()~>#+=|{}.!-]/g, "\\$&") : "";
 
-// ⏱️ HELPER: Sleep function for animation
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// --- 🎨 KHQR CARD GENERATOR ---
+async function generateKHQRCard(qrText, name, currencyType) {
+  const width = 600,
+    height = 900;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+
+  // Background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  // Red Header
+  ctx.fillStyle = "#EE282D";
+  ctx.fillRect(0, 0, width, 160);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 80px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("KHQR", width / 2, 110);
+
+  // QR
+  const qrBuffer = await QRCode.toBuffer(qrText, { width: 450, margin: 1 });
+  const qrImage = await loadImage(qrBuffer);
+  ctx.drawImage(qrImage, (width - 450) / 2, 220, 450, 450);
+
+  // Text
+  ctx.fillStyle = "#000000";
+  ctx.font = "bold 35px Arial";
+  ctx.fillText(name, width / 2, 730);
+  ctx.fillStyle = "#555555";
+  ctx.font = "30px Arial";
+  ctx.fillText(
+    currencyType === khqrData.currency.usd ? "USD ($)" : "KHR (៛)",
+    width / 2,
+    780
+  );
+
+  // Footer
+  ctx.fillStyle = "#EE282D";
+  ctx.font = "bold 25px Arial";
+  ctx.fillText("Powered by Bakong", width / 2, 850);
+
+  return canvas.toBuffer();
+}
 
 const setupBot = (token, domain, createTempLink, io) => {
   let bot;
 
-  // 1. Initialize Bot (Local vs Cloud)
   if (domain.includes("localhost") || domain.startsWith("http:")) {
     console.log("⚠️  Local Mode: POLLING");
     bot = new TelegramBot(token, { polling: true });
@@ -31,23 +75,12 @@ const setupBot = (token, domain, createTempLink, io) => {
     bot.setWebHook(`${domain}/bot${token}`);
   }
 
-  // 2. Set the Blue "Menu" Button in Telegram
-  bot.setMyCommands([
-    { command: "start", description: "Restart & Main Menu" },
-    { command: "contact", description: "Contact the Developer" },
-    { command: "source", description: "Get Source Code" },
-    { command: "donate", description: "Buy me a Coffee" },
-  ]);
-
-  // 3. Main Message Handler
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-    const firstName = escapeMarkdown(msg.from.first_name || "Friend");
-
     if (!text) return;
 
-    // --- USER TRACKING (Dashboard Logic) ---
+    // --- 1. USER TRACKING ---
     const existingUser = state.userList.find((u) => u.id === chatId);
     if (!existingUser) {
       state.userList.push({
@@ -64,34 +97,27 @@ const setupBot = (token, domain, createTempLink, io) => {
     if (state.userList.length > 50) state.userList.pop();
     if (io) io.emit("update_stats", state);
 
-    // ==============================================
-    //               🤖 COMMANDS
-    // ==============================================
-
-    // Command: /start
+    // --- 2. COMMANDS ---
     if (text === "/start") {
-      const welcomeMsg = `
-👋 **Hi, ${firstName}!** I am your **TikTok Downloader Bot**. 
-I remove watermarks and let you download videos in HD.
+      const name = escapeMarkdown(msg.from.first_name);
+      const welcome = `
+👋 **Hello ${name}!**
+
+I am **Nexus**, your professional TikTok Downloader.
 
 ✨ **Features:**
 • 🚫 No Watermark
-• ⚡ Super Fast
-• 📂 Handles Large Files (>50MB)
+• ⚡ Ultra-Fast Speed
+• ♾️ Unlimited Downloads
+• 📱 HD Quality
 
-👇 **Use the buttons below or paste a link:**
+👇 **Just paste a TikTok link to begin!**
             `;
       try {
         await bot.sendMessage(chatId, welcomeMsg, {
           parse_mode: "Markdown",
           reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "👨‍💻 Source Code", url: "https://github.com/lorndavid/botdownloadtiktok" },
-                { text: "💬 Contact Me", url: "https://t.me/Tutuvid" },
-              ],
-              [{ text: "☕ Buy Me A Coffee", url: "https://link.payway.com.kh/ABAPAYFB405176Y" }],
-            ],
+            inline_keyboard: [[{ text: "📊 Live Dashboard", url: domain }]],
           },
         });
       } catch (e) {
@@ -100,34 +126,14 @@ I remove watermarks and let you download videos in HD.
       return;
     }
 
-    // Command: /contact
-    if (text === "/contact") {
-      await bot.sendMessage(chatId, "💬 **Contact The Owner:**\n\n👤 @Tutuvid\n🔗 https://t.me/Tutuvid", { parse_mode: 'Markdown' });
-      return;
-    }
-
-    // Command: /source
-    if (text === "/source" || text === "/github") {
-      await bot.sendMessage(chatId, "👨‍💻 **Open Source:**\n\nStar the repo here:\nhttps://github.com/lorndavid/botdownloadtiktok");
-      return;
-    }
-
-    //Command: Buy Me A Coffee
-    if (text === "/donate"){
-      await bot.sendMessage(chatId, "Help me but a coffee to do more open source code !!\n\n click now: https://link.payway.com.kh/ABAPAYFB405176Y ");
-      return;
-    }
-
-    // ==============================================
-    //            🎥 VIDEO PROCESSING
-    // ==============================================
+    // --- 3. VIDEO PROCESSING ---
     if (text.includes("tiktok.com")) {
       const sentMsg = await bot.sendMessage(
         chatId,
         "🔍 **Analyzing Link...**",
         { parse_mode: "Markdown" }
       );
-      const msgId = sentMsg.message_id;
+      const msgId = sentMsg.message_id; // Save ID to edit it later
 
       const data = await getTikTokData(text);
 
@@ -158,44 +164,38 @@ I remove watermarks and let you download videos in HD.
         }
         // CASE B: NORMAL FILE (WITH ANIMATION)
         else {
-          // 1. DOWNLOAD ANIMATION LOOP
+          // 🎬 START ANIMATION LOOP
           const steps = [
             "⏳ **Downloading: [░░░░░░░░░░] 1%**",
             "⏳ **Downloading: [███░░░░░░░] 25%**",
             "⏳ **Downloading: [█████░░░░░] 50%**",
             "⏳ **Downloading: [███████░░░] 75%**",
             "⏳ **Downloading: [█████████░] 95%**",
-            "☁️ **Processing Complete...**",
+            "✅ **Complete! Uploading...**",
           ];
 
           for (const step of steps) {
             try {
+              // Edit the message to show new progress
               await bot.editMessageText(step, {
                 chat_id: chatId,
                 message_id: msgId,
                 parse_mode: "Markdown",
               });
-              await sleep(400); // Faster updates
-            } catch (err) { }
+              // Wait 500ms between updates (prevents "Too Many Requests" error)
+              await sleep(500);
+            } catch (err) {
+              // If user deletes chat during animation, ignore error
+            }
           }
 
-          // 2. HEADER ANIMATION (The "Sending video..." status at top of chat)
-          await bot.editMessageText("☁️ **Uploading to Telegram...**", {
-            chat_id: chatId,
-            message_id: msgId,
-            parse_mode: "Markdown",
-          });
-          
-          // 🚀 This command makes the top bar say "sending video..."
-          bot.sendChatAction(chatId, 'upload_video'); 
-
-          // 3. SEND THE FILE
+          // 🚀 SEND THE FILE
           try {
             await bot.sendVideo(chatId, data.videoUrl, {
               caption: `🎬 *${cleanAuthor}*\n${cleanTitle}\n\n✨ *Downloaded by @nodevid_bot*`,
               parse_mode: "Markdown",
             });
-            bot.deleteMessage(chatId, msgId); // Clean up status message
+            bot.deleteMessage(chatId, msgId); // Delete the "Loading..." message
           } catch (e) {
             console.error("Upload Error:", e.message);
             // Fallback
