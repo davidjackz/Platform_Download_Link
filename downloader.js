@@ -36,8 +36,7 @@ async function getTikTokData(url) {
       attempts++;
       const apiUrl = `https://tikwm.com/api/?url=${url}&hd=1`;
 
-      if (attempts % 10 === 0)
-        console.log(`[Attempt ${attempts}] Fetching Metadata...`);
+      if (attempts % 10 === 0) console.log(`[Attempt ${attempts}] Fetching Metadata...`);
 
       const response = await client.get(apiUrl, {
         headers: { "User-Agent": getRandomAgent() },
