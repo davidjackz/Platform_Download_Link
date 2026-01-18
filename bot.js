@@ -88,9 +88,7 @@ const setupBot = (token, domain, createTempLink, io) => {
             { text: "💎 Donate Bot", callback_data: "menu_donate_select" }, 
             { text: "📞 Support", url: "https://t.me/Tutuvid" }
         ],
-        [
-            { text: "👨‍💻 Source Code", url: GITHUB_LINK } // 🆕 Added Button
-        ]
+      
       ]
     }
   };
