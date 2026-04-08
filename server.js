@@ -1,71 +1,142 @@
-process.env.UV_THREADPOOL_SIZE = 128; // 🚀 MAX POWER
+process.env.UV_THREADPOOL_SIZE = 128;
 
 require("dotenv").config();
+
+const compression = require("compression");
 const express = require("express");
 const http = require("http");
 const mongoose = require("mongoose");
-const { Server } = require("socket.io");
-const bodyParser = require("body-parser");
 const path = require("path");
-const compression = require("compression");
-const { setupBot, state } = require("./bot");
+const { Server } = require("socket.io");
+
+const { setupBot } = require("./bot");
+const { buildFallbackDashboard, emitDashboardUpdate, getDashboardData } = require("./dashboard-data");
 const User = require("./models/User");
+const { logMediaRuntimeStatus } = require("./services/runtime-tools");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// DB
-mongoose.connect(process.env.MONGO_URI, { maxPoolSize: 100 })
-  .then(() => console.log("✅ DB Connected"))
-  .catch(e => console.log("❌ DB Error", e));
+const TOKEN = process.env.TELEGRAM_TOKEN;
+const PORT = process.env.PORT || 3000;
+const DOMAIN = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+mongoose
+  .connect(process.env.MONGO_URI, { maxPoolSize: 100 })
+  .then(() => console.log("DB connected"))
+  .catch((error) => console.error("DB connection error", error));
+
+logMediaRuntimeStatus(console).catch((error) => {
+  console.error("Media runtime check failed", error.message || error);
+});
 
 app.use(compression());
-app.use(bodyParser.json());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 app.use(express.static(path.join(__dirname, "public")));
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
-const DOMAIN = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
-const PORT = process.env.PORT || 3000;
+app.get("/dashboard.css", (req, res) => {
+  res.sendFile(path.join(__dirname, "dashboard.css"));
+});
 
-// Bot
+app.get("/dashboard.js", (req, res) => {
+  res.sendFile(path.join(__dirname, "dashboard.js"));
+});
+
 const bot = setupBot(TOKEN, DOMAIN, null, io);
 
-// Dashboard
+io.on("connection", (socket) => {
+  emitDashboardUpdate(socket).catch((error) => {
+    console.error("Initial dashboard sync failed:", error.message);
+  });
+});
+
+setInterval(() => {
+  emitDashboardUpdate(io).catch((error) => {
+    console.error("Scheduled dashboard sync failed:", error.message);
+  });
+}, 60000);
+
 app.get("/", async (req, res) => {
   try {
-    const [totalUsers, downloads, users, chartRaw] = await Promise.all([
-      User.countDocuments(),
-      User.aggregate([{ $group: { _id: null, total: { $sum: "$downloads" } } }]),
-      User.find().sort({ lastActive: -1 }).limit(10).lean(),
-      User.aggregate([
-        { $match: { joinedAt: { $gte: new Date(Date.now() - 7 * 86400000) } } },
-        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$joinedAt" } }, count: { $sum: 1 } } },
-        { $sort: { _id: 1 } }
-      ])
-    ]);
+    const dashboardData = await getDashboardData();
 
     res.render("dashboard", {
-      stats: { downloads: downloads[0]?.total || 0, total_users: totalUsers, active_now: state.userList.length },
-      chartData: { labels: chartRaw.map(d => d._id), values: chartRaw.map(d => d.count) },
-      users: state.userList,
-      dbUsers: users,
-      uptime: process.uptime()
+      dashboardData,
+      uptime: process.uptime(),
     });
-  } catch (e) {
-    res.render("dashboard", { stats: { downloads: 0, total_users: 0, active_now: 0 }, chartData: { labels: [], values: [] }, users: [], dbUsers: [], uptime: 0 });
+  } catch (error) {
+    console.error("Dashboard render failed", error);
+
+    res.render("dashboard", {
+      dashboardData: buildFallbackDashboard(),
+      uptime: process.uptime(),
+    });
   }
 });
 
-// Webhook
+async function setUserBlockStatus(req, res, isBlocked) {
+  const telegramId = Number(req.params.telegramId);
+
+  if (!Number.isFinite(telegramId)) {
+    res.status(400).json({ ok: false, message: "Invalid Telegram ID." });
+    return;
+  }
+
+  const user = await User.findOneAndUpdate(
+    { telegramId },
+    {
+      $set: {
+        isBlocked,
+        blockedAt: isBlocked ? new Date() : null,
+      },
+    },
+    { new: true }
+  ).lean();
+
+  if (!user) {
+    res.status(404).json({ ok: false, message: "User not found." });
+    return;
+  }
+
+  await emitDashboardUpdate(io);
+  res.json({ ok: true, telegramId, isBlocked });
+}
+
+app.post("/api/users/:telegramId/block", async (req, res) => {
+  try {
+    await setUserBlockStatus(req, res, true);
+  } catch (error) {
+    console.error("Block action failed", error);
+    res.status(500).json({ ok: false, message: "Unable to block user." });
+  }
+});
+
+app.post("/api/users/:telegramId/unblock", async (req, res) => {
+  try {
+    await setUserBlockStatus(req, res, false);
+  } catch (error) {
+    console.error("Unblock action failed", error);
+    res.status(500).json({ ok: false, message: "Unable to unblock user." });
+  }
+});
+
 app.post(`/bot${TOKEN}`, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-// Crash Guard
-process.on("uncaughtException", (e) => console.error("🚨 Uncaught:", e));
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception", error);
+});
 
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection", reason);
+});
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

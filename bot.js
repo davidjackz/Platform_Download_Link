@@ -2,235 +2,1297 @@ const TelegramBot = require("node-telegram-bot-api");
 const { BakongKHQR, khqrData } = require("bakong-khqr");
 const QRCode = require("qrcode");
 const { createCanvas, loadImage } = require("canvas");
-const { getTikTokData } = require("./downloader");
-const User = require("./models/User");
+
+const {
+  MediaServiceError,
+  detectPlatform,
+  extractFirstSupportedUrl,
+  inferMediaType,
+  normalizeLanguage,
+  prepareMediaDownload,
+} = require("./downloader");
+const { DEFAULT_LANGUAGE, LANGUAGE_LABELS, t } = require("./locales/messages");
+const {
+  emitDashboardUpdate,
+  recordUserActivity,
+  state,
+} = require("./dashboard-data");
+const {
+  getOrCreateUser,
+  recordDownloadRequest,
+  recordFailedDownload,
+  recordSuccessfulDownload,
+  setPreferredLanguage,
+} = require("./services/user-service");
+const {
+  createDonationEvent,
+  updateDonationEvent,
+} = require("./services/donation-service");
+const {
+  BakongApiError,
+  classifyTransactionStatus,
+  checkTransactionStatusByMd5,
+  isBakongVerificationConfigured,
+} = require("./services/bakong-service");
+
 require("dotenv").config();
 
-// CONFIG
 const BAKONG_ACCOUNT = process.env.BAKONG_ACCOUNT_ID;
 const MERCHANT_NAME = process.env.MERCHANT_NAME || "Lorn David";
-const PAYWAY_LINK = "https://link.payway.com.kh/ABAPAYFB405176Y";
-const GITHUB_LINK = "https://github.com/lorndavid/botdownloadtiktok"; // 🆕 Source Link
+const PAYWAY_LINK = process.env.PAYWAY_LINK || "https://link.payway.com.kh/ABAPAYFB405176Y";
+const GITHUB_LINK = process.env.GITHUB_LINK || "https://github.com/davidjackz0505-arch/botdownloadtiktok";
+const SUPPORT_LINK = process.env.SUPPORT_LINK || "https://t.me/Tutuvid";
 
-// Global State
-const state = { stats: { downloads: 0, total_users: 0 }, userList: [] };
+const DONATION_EXPIRY_MS = 3 * 60 * 1000;
+const DONATION_POLL_MS = 3 * 1000;
+const DONATION_PRESETS = {
+  usd: [1, 3, 5],
+  khr: [500, 1000, 4000, 10000, 20000],
+};
 
-// Helper: Escape Markdown
-const escapeMarkdown = (text) => text ? text.replace(/[_*[\]()~>#+=|{}.!-]/g, "\\$&") : "";
+const pendingDonations = new Map();
 
-// --- 🎨 KHQR CARD GENERATOR ---
-async function generateKHQRCard(qrText, name, currencyType) {
-  const width = 600, height = 900;
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function trimCaptionUrl(url = "", maxLength = 900) {
+  return url.length > maxLength ? `${url.slice(0, maxLength - 3)}...` : url;
+}
+
+function buildCaption(language, sourceUrl) {
+  return [
+    buildSectionTitle("🔗", language === "km" ? "តំណប្រភព" : "Source Link"),
+    `<i>${escapeHtml(trimCaptionUrl(sourceUrl))}</i>`,
+  ].join("\n");
+}
+
+function buildBulletList(items = []) {
+  return items.map((item) => `- ${item}`).join("\n");
+}
+
+function buildFancyList(items = [], icon = "✦") {
+  return items.map((item) => `${icon} ${escapeHtml(item)}`).join("\n");
+}
+
+function buildSectionTitle(icon, title) {
+  return `<u><b>${icon} ${escapeHtml(title)}</b></u>`;
+}
+
+function decorateButton(icon, label) {
+  return `${icon} ${label}`;
+}
+
+function buildInlineNotice(icon, message) {
+  return `<b>${icon}</b> <i>${message}</i>`;
+}
+
+function buildProgressMessage(icon, title, subtitle) {
+  return [
+    `<b>${icon} ${escapeHtml(title)}</b>`,
+    subtitle ? `<i>${escapeHtml(subtitle)}</i>` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function getProgressCopy(language, statusKey) {
+  const copy = {
+    analyzing: {
+      icon: "🔎",
+      subtitle: language === "km"
+        ? "កំពុងអានតំណ និងរៀបចំឯកសារ..."
+        : "Reading your link and preparing the best file...",
+    },
+    downloadingVideo: {
+      icon: "🎬",
+      subtitle: language === "km"
+        ? "កំពុងទាញយកវីដេអូគុណភាពល្អ..."
+        : "Fetching the best video version for Telegram...",
+    },
+    downloadingAudio: {
+      icon: "🎵",
+      subtitle: language === "km"
+        ? "កំពុងបម្លែងវីដេអូទៅជា MP3..."
+        : "Converting the source into a clean MP3 file...",
+    },
+    uploadingVideo: {
+      icon: "📤",
+      subtitle: language === "km"
+        ? "កំពុងផ្ញើវីដេអូទៅអ្នក..."
+        : "Uploading your video now...",
+    },
+    uploadingAudio: {
+      icon: "📤",
+      subtitle: language === "km"
+        ? "កំពុងផ្ញើ MP3 ទៅអ្នក..."
+        : "Uploading your MP3 now...",
+    },
+  }[statusKey];
+
+  if (!copy) {
+    return t(language, `status.${statusKey}`);
+  }
+
+  return buildProgressMessage(copy.icon, t(language, `status.${statusKey}`), copy.subtitle);
+}
+
+function buildSourceText(language) {
+  return [
+    buildSectionTitle("💻", language === "km" ? "កូដប្រភព" : "Source Code"),
+    language === "km"
+      ? "<i>មើលកូដ ប្រើបន្ត ឬចូលរួមអភិវឌ្ឍន៍ជាមួយគម្រោងនេះ។</i>"
+      : "<i>Review the codebase, fork it, or contribute improvements to the project.</i>",
+    `<b>🔗 ${language === "km" ? "បើក Repository" : "Open Repository"}:</b> <a href="${escapeHtml(GITHUB_LINK)}">${escapeHtml(GITHUB_LINK)}</a>`,
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildContactText(language) {
+  return [
+    buildSectionTitle("💬", language === "km" ? "ទំនាក់ទំនង និងជំនួយ" : "Support & Contact"),
+    language === "km"
+      ? "<i>ត្រូវការជំនួយ ឬចង់ស្នើមុខងារថ្មី សូមទាក់ទងមកក្រុមគាំទ្រ។</i>"
+      : "<i>Need help, a bug fix, or a new feature request? Reach out directly.</i>",
+    `<b>🔗 ${language === "km" ? "ទាក់ទង Support" : "Contact Support"}:</b> <a href="${escapeHtml(SUPPORT_LINK)}">${escapeHtml(SUPPORT_LINK)}</a>`,
+  ].filter(Boolean).join("\n\n");
+}
+
+function resolveLanguage(userRecord, telegramUser = {}) {
+  return (
+    userRecord?.preferredLanguage ||
+    normalizeLanguage(telegramUser.language_code || DEFAULT_LANGUAGE)
+  );
+}
+
+function buildWelcomeText(language, name) {
+  const intro = t(language, "welcome.intro", { name: escapeHtml(name || "there") });
+
+  return [
+    buildSectionTitle("🚀", t(language, "welcome.title")),
+    `<i>${intro}</i>`,
+    buildSectionTitle("✨", t(language, "welcome.featuresTitle")),
+    buildFancyList(t(language, "welcome.features"), "✦"),
+    buildSectionTitle("⚡", t(language, "welcome.usageTitle")),
+    buildFancyList(t(language, "welcome.usage"), "➜"),
+    `🌐 ${t(language, "welcome.languageLine", {
+      language: LANGUAGE_LABELS[language] || LANGUAGE_LABELS.en,
+    })}`,
+    language === "km"
+      ? "<i>តំណមួយគត់គ្រប់គ្រាន់ ប៊ុតនឹងរកឃើញវេទិកា និងផ្ញើឯកសារដោយស្វ័យប្រវត្តិ។</i>"
+      : "<i>Drop one link and the bot will detect the platform, process it, and send the file automatically.</i>",
+  ].join("\n\n");
+}
+
+function buildHelpText(language) {
+  return [
+    buildSectionTitle("🧭", t(language, "help.title")),
+    buildFancyList(t(language, "help.body"), "✦"),
+    buildSectionTitle("🔗", t(language, "help.supportedTitle")),
+    buildFancyList(t(language, "help.supported"), "•"),
+    language === "km"
+      ? "<i>សូមប្រើតំណសាធារណៈ។ បើឯកសារធំពេក សូមសាកល្បងវីដេអូខ្លីជាងមុន។</i>"
+      : "<i>Use public links whenever possible. If Telegram rejects a file size, try a shorter clip.</i>",
+  ].join("\n\n");
+}
+
+function formatCurrencyCode(currencyType) {
+  return currencyType === khqrData.currency.usd ? "USD" : "KHR";
+}
+
+function formatCurrencyPresetCode(currencyCode) {
+  return currencyCode === "usd" ? khqrData.currency.usd : khqrData.currency.khr;
+}
+
+function formatDonationAmount(amount, currencyType) {
+  if (currencyType === khqrData.currency.usd) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+    }).format(amount);
+  }
+
+  return `${new Intl.NumberFormat("en-US").format(amount)} KHR`;
+}
+
+function formatDateTime(dateValue) {
+  return new Date(dateValue).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getDonationPresets(currencyCode) {
+  return DONATION_PRESETS[currencyCode] || [];
+}
+
+function createMainMenu(language) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: decorateButton("✨", t(language, "buttons.help")), callback_data: "menu_help" },
+          { text: decorateButton("🌐", t(language, "buttons.language")), callback_data: "menu_language" },
+        ],
+        [
+          { text: decorateButton("❤️", t(language, "buttons.donate")), callback_data: "menu_donate" },
+          { text: decorateButton("💻", t(language, "buttons.source")), url: GITHUB_LINK },
+        ],
+        [
+          { text: decorateButton("💬", t(language, "buttons.support")), url: SUPPORT_LINK },
+        ],
+      ],
+    },
+  };
+}
+
+function createBackMenu(language) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: decorateButton("⬅️", t(language, "buttons.back")), callback_data: "menu_home" },
+          { text: decorateButton("🌐", t(language, "buttons.language")), callback_data: "menu_language" },
+        ],
+      ],
+    },
+  };
+}
+
+function createLanguageMenu(language) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: decorateButton("🇺🇸", t(language, "buttons.english")), callback_data: "language_set_en" },
+          { text: decorateButton("🇰🇭", t(language, "buttons.khmer")), callback_data: "language_set_km" },
+        ],
+        [{ text: decorateButton("⬅️", t(language, "buttons.back")), callback_data: "menu_home" }],
+      ],
+    },
+  };
+}
+
+function createDonateMenu(language) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: decorateButton("💵", t(language, "buttons.usd")), callback_data: "donate_currency_usd" },
+          { text: decorateButton("៛", t(language, "buttons.khr")), callback_data: "donate_currency_khr" },
+        ],
+        [{ text: decorateButton("⬅️", t(language, "buttons.back")), callback_data: "menu_home" }],
+      ],
+    },
+  };
+}
+
+function createDonateAmountMenu(language, currencyCode) {
+  const presets = getDonationPresets(currencyCode);
+  const rows = [];
+
+  for (let index = 0; index < presets.length; index += 2) {
+    const pair = presets.slice(index, index + 2).map((amount) => ({
+      text: decorateButton("💸", formatDonationAmount(amount, formatCurrencyPresetCode(currencyCode))),
+      callback_data: `donate_amount_${currencyCode}_${amount}`,
+    }));
+
+    rows.push(pair);
+  }
+
+  rows.push([{ text: decorateButton("⬅️", t(language, "buttons.back")), callback_data: "menu_donate" }]);
+
+  return {
+    reply_markup: {
+      inline_keyboard: rows,
+    },
+  };
+}
+
+function createDonationStatusMenu(language, md5) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: decorateButton("✅", t(language, "buttons.checkPayment")), callback_data: `donate_check_${md5}` }],
+        [{ text: decorateButton("⬅️", t(language, "buttons.back")), callback_data: "menu_home" }],
+      ],
+    },
+  };
+}
+
+async function syncDashboard(io) {
+  try {
+    await emitDashboardUpdate(io);
+  } catch (error) {
+    console.error("Dashboard sync failed:", error.message);
+  }
+}
+
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+async function generateKHQRCard(donation) {
+  const width = 840;
+  const height = 1280;
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
 
-  // Background
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = "#f5f5f5";
   ctx.fillRect(0, 0, width, height);
 
-  // Red Header
-  ctx.fillStyle = "#EE282D";
-  ctx.fillRect(0, 0, width, 160);
+  ctx.shadowColor = "rgba(15, 23, 42, 0.12)";
+  ctx.shadowBlur = 28;
+  ctx.shadowOffsetY = 14;
+  drawRoundedRect(ctx, 54, 54, width - 108, height - 108, 30);
   ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 80px Arial";
+  ctx.fill();
+
+  ctx.shadowColor = "transparent";
+  drawRoundedRect(ctx, 54, 54, width - 108, height - 108, 30);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+
+  const cardX = 54;
+  const cardY = 54;
+  const cardWidth = width - 108;
+  const cardHeight = height - 108;
+  const headerHeight = 170;
+  const foldSize = 78;
+  const qrSize = 560;
+  const qrX = Math.round((width - qrSize) / 2);
+  const qrY = 550;
+
+  drawRoundedRect(ctx, cardX, cardY, cardWidth, headerHeight, 30);
+  ctx.fillStyle = "#ed161b";
+  ctx.fill();
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 60px Arial";
   ctx.textAlign = "center";
-  ctx.fillText("KHQR", width / 2, 110);
+  ctx.fillText("KHQR", width / 2, 157);
 
-  // QR
-  const qrBuffer = await QRCode.toBuffer(qrText, { width: 450, margin: 1 });
+  ctx.beginPath();
+  ctx.moveTo(cardX + cardWidth - foldSize - 10, cardY + headerHeight);
+  ctx.lineTo(cardX + cardWidth, cardY + headerHeight);
+  ctx.lineTo(cardX + cardWidth, cardY + headerHeight + foldSize);
+  ctx.closePath();
+  ctx.fillStyle = "#ed161b";
+  ctx.fill();
+
+  const qrBuffer = await QRCode.toBuffer(donation.qrText, {
+    width: qrSize,
+    margin: 1,
+    errorCorrectionLevel: "H",
+  });
   const qrImage = await loadImage(qrBuffer);
-  ctx.drawImage(qrImage, (width - 450) / 2, 220, 450, 450);
 
-  // Text
-  ctx.fillStyle = "#000000";
-  ctx.font = "bold 35px Arial";
-  ctx.fillText(name, width / 2, 730);
-  ctx.fillStyle = "#555555";
-  ctx.font = "30px Arial";
-  ctx.fillText(currencyType === khqrData.currency.usd ? "USD ($)" : "KHR (៛)", width / 2, 780);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#111111";
+  ctx.font = "48px Arial";
+  ctx.fillText(donation.merchantName.toUpperCase(), cardX + 72, 315);
 
-  // Footer
-  ctx.fillStyle = "#EE282D";
-  ctx.font = "bold 25px Arial";
-  ctx.fillText("Powered by Bakong", width / 2, 850);
+  ctx.font = "bold 80px Arial";
+  const cardAmount = donation.currencyType === khqrData.currency.usd
+    ? `$${Number(donation.amount).toFixed(2)}`
+    : `៛ ${new Intl.NumberFormat("en-US").format(donation.amount)}`;
+  ctx.fillText(cardAmount, cardX + 72, 420);
+
+  ctx.beginPath();
+  ctx.setLineDash([22, 18]);
+  ctx.strokeStyle = "#969696";
+  ctx.lineWidth = 3;
+  ctx.moveTo(cardX, 500);
+  ctx.lineTo(cardX + cardWidth, 500);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+
+  const badgeX = width / 2;
+  const badgeY = qrY + qrSize / 2;
+  ctx.beginPath();
+  ctx.arc(badgeX, badgeY, 46, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(badgeX, badgeY, 38, 0, Math.PI * 2);
+  ctx.fillStyle = "#c80815";
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(badgeX, badgeY);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 4;
+  const spikes = 8;
+  const outerRadius = 22;
+  const innerRadius = 16;
+  ctx.beginPath();
+  for (let index = 0; index < spikes * 2; index += 1) {
+    const angle = (Math.PI / spikes) * index - Math.PI / 2;
+    const radius = index % 2 === 0 ? outerRadius : innerRadius;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+    if (index === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.font = "bold 28px Arial";
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("C", 0, 2);
+  ctx.restore();
+
+  ctx.fillStyle = "#5f5f5f";
+  ctx.font = "22px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText(`Bill ${donation.billNumber}`, width / 2, 1180);
+  ctx.fillText(`Valid until ${formatDateTime(donation.expiresAt)}`, width / 2, 1216);
 
   return canvas.toBuffer();
+}
+
+async function safeEditMessage(bot, chatId, messageId, text, options = {}) {
+  if (!messageId) {
+    return null;
+  }
+
+  try {
+    return await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...options,
+    });
+  } catch (error) {
+    if (/message is not modified/i.test(error.message || "")) {
+      return null;
+    }
+
+    return null;
+  }
+}
+
+async function safeEditReplyMarkup(bot, chatId, messageId, replyMarkup) {
+  if (!messageId) {
+    return null;
+  }
+
+  try {
+    return await bot.editMessageReplyMarkup(replyMarkup, {
+      chat_id: chatId,
+      message_id: messageId,
+    });
+  } catch (error) {
+    return null;
+  }
+}
+
+async function safeDeleteMessage(bot, chatId, messageId) {
+  if (!messageId) {
+    return null;
+  }
+
+  try {
+    return await bot.deleteMessage(chatId, messageId);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function sendOrEdit(bot, chatId, messageId, text, options = {}) {
+  const edited = await safeEditMessage(bot, chatId, messageId, text, options);
+  if (edited) {
+    return edited;
+  }
+
+  return bot.sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...options,
+  });
+}
+
+function resolveErrorMessage(language, error) {
+  const errorMessage = String(error?.message || "");
+
+  if (!(error instanceof MediaServiceError)) {
+    return t(language, "status.genericError");
+  }
+
+  if (
+    error.code === "MISSING_DEPENDENCY" ||
+    /not installed|not available on path/i.test(errorMessage)
+  ) {
+    return t(language, "status.toolMissing");
+  }
+
+  if (
+    error.code === "FILE_TOO_LARGE" ||
+    /larger than|max-filesize/i.test(errorMessage)
+  ) {
+    return t(language, "status.fileTooLarge");
+  }
+
+  if (error.code === "UNSUPPORTED_URL") {
+    return t(language, "status.unsupported");
+  }
+
+  if (
+    error.code === "UNAVAILABLE" ||
+    error.code === "BAD_METADATA" ||
+    /private|sign in|members only|requested format is not available|unavailable/i.test(errorMessage)
+  ) {
+    return t(language, "status.privateLink");
+  }
+
+  return t(language, "status.genericError");
+}
+
+function buildDonationCaption(language, donation, includeSuccess = false) {
+  const autoHint = language === "km"
+    ? "ប្រព័ន្ធនឹងពិនិត្យការទូទាត់ស្វ័យប្រវត្តិរៀងរាល់ 3 វិនាទី ហើយ QR នេះមានសុពលភាព 3 នាទី។"
+    : "Payment is checked automatically every 3 seconds and this QR is valid for 3 minutes.";
+
+  const lines = [
+    buildSectionTitle("❤️", t(language, "status.donateIntro")),
+    `<i>${escapeHtml(autoHint)}</i>`,
+    "",
+    `<b>💸 ${language === "km" ? "ចំនួនទឹកប្រាក់" : "Amount"}:</b> ${formatDonationAmount(donation.amount, donation.currencyType)}`,
+    `<b>💱 ${language === "km" ? "រូបិយប័ណ្ណ" : "Currency"}:</b> ${formatCurrencyCode(donation.currencyType)}`,
+    `<b>🧾 ${language === "km" ? "លេខបង្កាន់ដៃ" : "Bill"}:</b> ${escapeHtml(donation.billNumber)}`,
+    `<b>⏳ ${language === "km" ? "ផុតកំណត់" : "Expires"}:</b> ${escapeHtml(formatDateTime(donation.expiresAt))}`,
+    `<b>🔗 PayWay:</b> ${escapeHtml(PAYWAY_LINK)}`,
+  ];
+
+  if (!isBakongVerificationConfigured()) {
+    lines.splice(2, 0, buildInlineNotice("⚠️", t(language, "status.donateVerificationUnavailable")));
+  }
+
+  if (includeSuccess) {
+    lines.push(
+      "",
+      `<b>✅ ${t(language, "status.donateSuccess", {
+        name: escapeHtml(donation.firstName || "friend"),
+      })}</b>`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function clearDonationSession(md5) {
+  const session = pendingDonations.get(md5);
+  if (session?.timer) {
+    clearInterval(session.timer);
+  }
+  if (session?.expiryTimer) {
+    clearTimeout(session.expiryTimer);
+  }
+  pendingDonations.delete(md5);
+}
+
+function stopDonationPolling(md5) {
+  const session = pendingDonations.get(md5);
+
+  if (!session?.timer) {
+    return;
+  }
+
+  clearInterval(session.timer);
+  pendingDonations.set(md5, {
+    ...session,
+    timer: null,
+  });
+}
+
+async function finalizeDonationSuccess(bot, session) {
+  await safeDeleteMessage(bot, session.chatId, session.photoMessageId);
+
+  await bot.sendMessage(
+    session.chatId,
+    [
+      buildSectionTitle("✅", session.language === "km" ? "ការទូទាត់ជោគជ័យ" : "Payment Confirmed"),
+      t(session.language, "status.donateSuccess", {
+        name: escapeHtml(session.firstName || "friend"),
+      }),
+      "",
+      `<b>💸 ${session.language === "km" ? "ចំនួនទឹកប្រាក់" : "Amount"}:</b> ${formatDonationAmount(session.amount, session.currencyType)}`,
+      `<b>🧾 ${session.language === "km" ? "លេខបង្កាន់ដៃ" : "Bill"}:</b> ${escapeHtml(session.billNumber)}`,
+    ].join("\n"),
+    { parse_mode: "HTML" }
+  );
+}
+
+async function finalizeDonationExpired(bot, session, io) {
+  await updateDonationEvent(session.md5, {
+    status: "expired",
+    lastCheckedAt: new Date(),
+    errorMessage: "Donation session expired before payment confirmation.",
+  }).catch(() => {});
+  clearDonationSession(session.md5);
+  await safeDeleteMessage(bot, session.chatId, session.photoMessageId);
+  await bot.sendMessage(session.chatId, t(session.language, "status.donateExpired"), {
+    parse_mode: "HTML",
+  }).catch(() => {});
+  await syncDashboard(io);
+}
+
+async function finalizeDonationFailed(bot, session, message) {
+  await updateDonationEvent(session.md5, {
+    status: "failed",
+    lastCheckedAt: new Date(),
+    errorMessage: message,
+  }).catch(() => {});
+  clearDonationSession(session.md5);
+  await safeDeleteMessage(bot, session.chatId, session.photoMessageId);
+  return {
+    state: "failed",
+    callbackText: message,
+  };
+}
+
+async function checkDonationStatus(bot, md5, io) {
+  const session = pendingDonations.get(md5);
+
+  if (!session) {
+    return { state: "expired", callbackText: t("en", "status.donateExpired") };
+  }
+
+  if (Date.now() > session.expiresAt) {
+    await finalizeDonationExpired(bot, session, io);
+    return {
+      state: "expired",
+      callbackText: t(session.language, "status.donateExpired"),
+    };
+  }
+
+  if (!isBakongVerificationConfigured()) {
+    return {
+      state: "unavailable",
+      callbackText: t(session.language, "status.donateVerificationUnavailable"),
+    };
+  }
+
+  try {
+    const payload = await checkTransactionStatusByMd5(md5);
+    const status = classifyTransactionStatus(payload);
+
+    if (status.state === "success") {
+      await updateDonationEvent(md5, {
+        status: "success",
+        paidAt: new Date(),
+        lastCheckedAt: new Date(),
+        transactionHash: status.transaction?.hash || null,
+        errorMessage: null,
+      }).catch(() => {});
+      clearDonationSession(md5);
+      await finalizeDonationSuccess(bot, session);
+      await syncDashboard(io);
+      return {
+        state: "success",
+        callbackText: t(session.language, "status.donateSuccessShort"),
+      };
+    }
+
+    if (status.state === "failed") {
+      return finalizeDonationFailed(bot, session, t(session.language, "status.donateFailed"));
+    }
+
+    if (status.state === "unsupported") {
+      await updateDonationEvent(md5, {
+        status: "unsupported",
+        lastCheckedAt: new Date(),
+        errorMessage: t(session.language, "status.donateUnsupported"),
+      }).catch(() => {});
+      clearDonationSession(md5);
+      await safeDeleteMessage(bot, session.chatId, session.photoMessageId);
+      return {
+        state: "unsupported",
+        callbackText: t(session.language, "status.donateUnsupported"),
+      };
+    }
+
+    if (status.state === "pending") {
+      return {
+        state: "pending",
+        callbackText: t(session.language, "status.donatePending"),
+      };
+    }
+
+    return {
+      state: "error",
+      callbackText: t(session.language, "status.genericError"),
+    };
+  } catch (error) {
+    console.error("Bakong transaction check failed:", error.message || error);
+
+    if (
+      error instanceof BakongApiError &&
+      ["MISSING_TOKEN", "MISSING_EMAIL", "UNAUTHORIZED", "TOKEN_RENEW_FAILED"].includes(error.code)
+    ) {
+      await updateDonationEvent(md5, {
+        status: "auth_error",
+        lastCheckedAt: new Date(),
+        errorMessage: error.message || t(session.language, "status.donateVerificationAuthError"),
+      }).catch(() => {});
+      return {
+        state: "auth_error",
+        callbackText: t(session.language, "status.donateVerificationAuthError"),
+      };
+    }
+
+    return {
+      state: "error",
+      callbackText: t(session.language, "status.genericError"),
+    };
+  }
+}
+
+async function runDonationStatusCheck(bot, md5, io) {
+  const session = pendingDonations.get(md5);
+
+  if (!session) {
+    return { state: "expired", callbackText: t("en", "status.donateExpired") };
+  }
+
+  if (session.checking) {
+    return {
+      state: "pending",
+      callbackText: t(session.language, "status.donatePending"),
+    };
+  }
+
+  pendingDonations.set(md5, {
+    ...session,
+    checking: true,
+  });
+
+  try {
+    return await checkDonationStatus(bot, md5, io);
+  } finally {
+    const latest = pendingDonations.get(md5);
+    if (latest) {
+      pendingDonations.set(md5, {
+        ...latest,
+        checking: false,
+      });
+    }
+  }
+}
+
+function scheduleDonationCheck(bot, session, io) {
+  const timer = isBakongVerificationConfigured()
+    ? setInterval(async () => {
+        const result = await runDonationStatusCheck(bot, session.md5, io);
+
+        if (["success", "failed", "expired", "unsupported"].includes(result.state)) {
+          clearDonationSession(session.md5);
+          return;
+        }
+
+        if (result.state === "auth_error") {
+          stopDonationPolling(session.md5);
+        }
+      }, DONATION_POLL_MS)
+    : null;
+
+  const expiryDelay = Math.max(session.expiresAt - Date.now(), 0);
+  const expiryTimer = setTimeout(async () => {
+    const latest = pendingDonations.get(session.md5);
+    if (!latest) {
+      return;
+    }
+
+    await finalizeDonationExpired(bot, latest, io);
+  }, expiryDelay);
+
+  pendingDonations.set(session.md5, {
+    ...session,
+    timer,
+    expiryTimer,
+    checking: false,
+  });
+}
+
+async function showHome(bot, chatId, sender, language, messageId) {
+  return sendOrEdit(
+    bot,
+    chatId,
+    messageId,
+    buildWelcomeText(language, sender.first_name || sender.username || "there"),
+    createMainMenu(language)
+  );
+}
+
+async function showHelp(bot, chatId, language, messageId) {
+  return sendOrEdit(
+    bot,
+    chatId,
+    messageId,
+    buildHelpText(language),
+    createBackMenu(language)
+  );
+}
+
+async function showLanguagePicker(bot, chatId, language, messageId) {
+  return sendOrEdit(
+    bot,
+    chatId,
+    messageId,
+    [
+      buildSectionTitle("🌐", t(language, "status.chooseLanguage")),
+      `<i>${language === "km" ? "ប្តូរភាសាប្រព័ន្ធសម្រាប់សារ និងម៉ឺនុយទាំងអស់។" : "Switch the bot language for every menu and reply."}</i>`,
+    ].join("\n\n"),
+    createLanguageMenu(language)
+  );
+}
+
+async function showDonateMenu(bot, chatId, language, messageId) {
+  return sendOrEdit(
+    bot,
+    chatId,
+    messageId,
+    [
+      buildSectionTitle("❤️", t(language, "status.chooseCurrency")),
+      `<i>${t(language, "status.donateIntro")}</i>`,
+      buildInlineNotice("⏱️", language === "km"
+        ? "បន្ទាប់ពីបង្កើត KHQR ប្រព័ន្ធនឹងពិនិត្យការទូទាត់ដោយស្វ័យប្រវត្តិ។"
+        : "Once the KHQR card is created, payment will be checked automatically."),
+    ].join("\n\n"),
+    createDonateMenu(language)
+  );
 }
 
 const setupBot = (token, domain, createTempLink, io) => {
   let bot;
   const bakong = new BakongKHQR();
 
-  // 🚀 CONNECTION LOGIC
   if (domain && !domain.includes("localhost")) {
-    console.log(`🌍 CLOUD MODE: Webhook Active`);
+    console.log("CLOUD MODE: Webhook active");
     bot = new TelegramBot(token);
-    bot.setWebHook(`${domain}/bot${token}`);
+    bot.setWebHook(`${domain}/bot${token}`).catch((error) => {
+      console.error("Failed to register webhook:", error.message || error);
+    });
   } else {
-    console.log("💻 LOCAL MODE: Polling Active");
+    console.log("LOCAL MODE: Polling active");
     bot = new TelegramBot(token, { polling: true });
     bot.deleteWebHook().catch(() => {});
   }
 
-  // ✅ SET COMMAND MENU
+  bot.on("polling_error", (error) => {
+    console.error("Telegram polling error:", error.code || error.message || error);
+  });
+
+  bot.on("webhook_error", (error) => {
+    console.error("Telegram webhook error:", error.message || error);
+  });
+
   bot.setMyCommands([
-    { command: "start", description: "🔥 Restart Bot" },
-    { command: "help", description: "❓ How to use" },
-    { command: "source", description: "👨‍💻 Source Code" }, // 🆕 Added Command
-    { command: "contact", description: "📞 Support" }
-  ]);
+    { command: "start", description: "Show welcome and features" },
+    { command: "help", description: "Show supported platforms" },
+    { command: "language", description: "Change bot language" },
+    { command: "donate", description: "Support the bot" },
+    { command: "source", description: "Open source repository" },
+    { command: "contact", description: "Support contact" },
+  ]).catch((error) => {
+    console.error("Failed to set bot commands:", error.code || error.message || error);
+  });
 
-  // --- MENUS ---
-  const mainMenu = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-            { text: "💎 Donate Bot", callback_data: "menu_donate_select" }, 
-            { text: "📞 Support", url: "https://t.me/Tutuvid" }
-        ],
-      
-      ]
-    }
-  };
-
-  const currencyMenu = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🇺🇸 USD", callback_data: "donate_final_usd" }, { text: "🇰🇭 KHR", callback_data: "donate_final_khr" }],
-        [{ text: "🔙 Back", callback_data: "cmd_start" }]
-      ]
-    }
-  };
-
-  // --- 📩 MESSAGE HANDLER ---
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
-    const text = msg.text;
-    if (!text) return;
+    const sender = msg.from || {};
+    const text = (msg.text || msg.caption || "").trim();
 
-    // 1. 👋 /start COMMAND
-    if (text === "/start") {
-      const name = escapeMarkdown(msg.from.first_name);
-      const welcome = `
-👋 **Hello ${name}!**
-
-I am **Nexus**, your professional TikTok Downloader.
-
-✨ **Features:**
-• 🚫 No Watermark
-• ⚡ Ultra-Fast Speed
-• ♾️ Unlimited Downloads
-• 📱 HD Quality
-
-👇 **Send me a TikTok link to begin!**
-      `;
-      bot.sendMessage(chatId, welcome, { parse_mode: "Markdown", ...mainMenu });
+    if (!sender.id) {
       return;
     }
 
-    // 2. ❓ /help COMMAND
-    if (text === "/help") {
-      const helpMsg = `
-❓ **How to use Nexus Bot**
+    const trackedUrl = extractFirstSupportedUrl(text);
+    const currentUser = await getOrCreateUser(sender);
+    const language = resolveLanguage(currentUser, sender);
 
-1. 📱 **Open TikTok** and find a video.
-2. ↗️ Click **Share** -> **Copy Link**.
-3. 📋 **Paste the link** here.
+    recordUserActivity(
+      { id: sender.id, firstName: sender.first_name, username: sender.username },
+      { lastLink: trackedUrl || currentUser?.lastLink || null }
+    );
 
-🔗 **Useful Links:**
-• [Join our Channel](https://t.me/Tutuvid)
-      `;
-      bot.sendMessage(chatId, helpMsg, { parse_mode: "Markdown", disable_web_page_preview: true });
+    if (currentUser?.isBlocked) {
+      await bot.sendMessage(chatId, buildInlineNotice("⛔", t(language, "status.blocked")), {
+        parse_mode: "HTML",
+      });
+      await syncDashboard(io);
       return;
     }
 
-    // 3. 👨‍💻 /source COMMAND (New)
-    if (text === "/source") {
-        const sourceMsg = `
-👨‍💻 **Open Source Project**
-
-This bot is fully open source! You can view the code, contribute, or leave a star on GitHub.
-
-🔗 **Link:** [Click here to view Source Code](${GITHUB_LINK})
-        `;
-        bot.sendMessage(chatId, sourceMsg, { parse_mode: "Markdown" });
-        return;
-    }
-
-    // 4. 📞 /contact COMMAND
-    if (text === "/contact") {
-      const contactMsg = `
-📞 **Support & Contact**
-
-Have a problem? Need a new feature?
-Click the link below to contact the admin:
-
-👤 **Admin:** [Chat with @Tutuvid](https://t.me/Tutuvid)
-📧 **Email:** [lorndavit12@gmail.com](mailto:lorndavit12@gmail.com)
-
-_We usually reply within 24 hours._
-      `;
-      bot.sendMessage(chatId, contactMsg, { parse_mode: "Markdown" });
+    if (!text) {
+      await syncDashboard(io);
       return;
     }
 
-    // 5. 🎬 DOWNLOAD LOGIC
-    if (text.includes("tiktok.com")) {
-      const statusMsg = await bot.sendMessage(chatId, "⏳ **Processing...**", { parse_mode: "Markdown" });
+    if (/^\/start\b/i.test(text)) {
+      await showHome(bot, chatId, sender, language);
+      await syncDashboard(io);
+      return;
+    }
 
-      try {
-        const data = await getTikTokData(text);
+    if (/^\/help\b/i.test(text)) {
+      await showHelp(bot, chatId, language);
+      await syncDashboard(io);
+      return;
+    }
 
-        if (data.status === "success") {
-          await bot.editMessageText("🚀 **Sending Video...**", { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "Markdown" });
-          bot.sendChatAction(chatId, "upload_video");
+    if (/^\/language\b/i.test(text)) {
+      await showLanguagePicker(bot, chatId, language);
+      await syncDashboard(io);
+      return;
+    }
 
-          await bot.sendVideo(chatId, data.videoUrl, {
-            caption: `✨ Downloaded by @nodevid_bot`,
-          });
+    if (/^\/donate\b/i.test(text)) {
+      await showDonateMenu(bot, chatId, language);
+      await syncDashboard(io);
+      return;
+    }
 
-          bot.deleteMessage(chatId, statusMsg.message_id);
+    if (/^\/source\b/i.test(text)) {
+      await bot.sendMessage(chatId, buildSourceText(language), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+      await syncDashboard(io);
+      return;
+    }
 
-          state.stats.downloads++;
-          await User.updateOne({ telegramId: chatId }, { $inc: { downloads: 1 }, firstName: msg.from.first_name, lastActive: Date.now() }, { upsert: true });
+    if (/^\/contact\b/i.test(text)) {
+      await bot.sendMessage(chatId, buildContactText(language), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+      await syncDashboard(io);
+      return;
+    }
 
-        } else {
-          bot.editMessageText("❌ **Failed.** Link expired or private.", { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: "Markdown" });
-        }
-      } catch (err) {
-        console.error(err);
-        bot.deleteMessage(chatId, statusMsg.message_id).catch(()=>{});
+    if (!trackedUrl) {
+      await bot.sendMessage(chatId, buildInlineNotice("🔗", t(language, "status.noLink")), {
+        parse_mode: "HTML",
+      });
+      await syncDashboard(io);
+      return;
+    }
+
+    const platform = detectPlatform(trackedUrl);
+    if (!platform) {
+      await bot.sendMessage(chatId, buildInlineNotice("⚠️", t(language, "status.unsupported")), {
+        parse_mode: "HTML",
+      });
+      await syncDashboard(io);
+      return;
+    }
+
+    await recordDownloadRequest(sender, {
+      sourceUrl: trackedUrl,
+      platform: platform.key,
+      language,
+    });
+
+    const mediaType = inferMediaType(platform.key);
+    const statusMessage = await bot.sendMessage(
+      chatId,
+      [
+        getProgressCopy(language, "analyzing"),
+        "",
+        getProgressCopy(language, mediaType === "audio" ? "downloadingAudio" : "downloadingVideo"),
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+
+    let preparedMedia = null;
+
+    try {
+      preparedMedia = await prepareMediaDownload(trackedUrl);
+
+      await safeEditMessage(
+        bot,
+        chatId,
+        statusMessage.message_id,
+        getProgressCopy(language, preparedMedia.mediaType === "audio" ? "uploadingAudio" : "uploadingVideo")
+      );
+
+      await bot.sendChatAction(
+        chatId,
+        preparedMedia.mediaType === "audio" ? "upload_audio" : "upload_video"
+      );
+
+      if (preparedMedia.mediaType === "audio") {
+        await bot.sendAudio(chatId, preparedMedia.filePath, {
+          caption: buildCaption(language, trackedUrl),
+          parse_mode: "HTML",
+          title: preparedMedia.title || undefined,
+          performer: preparedMedia.uploader || undefined,
+        });
+      } else {
+        await bot.sendVideo(chatId, preparedMedia.filePath, {
+          caption: buildCaption(language, trackedUrl),
+          parse_mode: "HTML",
+          supports_streaming: true,
+        });
       }
+
+      await bot.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
+
+      await recordSuccessfulDownload(sender, {
+        sourceUrl: trackedUrl,
+        platform: preparedMedia.platform,
+        mediaType: preparedMedia.mediaType,
+        title: preparedMedia.title,
+        fileName: preparedMedia.fileName,
+        fileSizeBytes: preparedMedia.fileSizeBytes,
+        language,
+      });
+    } catch (error) {
+      console.error(error);
+
+      await recordFailedDownload(sender, {
+        sourceUrl: trackedUrl,
+        platform: platform.key,
+        mediaType,
+        title: `${platform.label} request failed`,
+        fileName: preparedMedia?.fileName || null,
+        fileSizeBytes: preparedMedia?.fileSizeBytes || null,
+        language,
+        errorMessage: error.message || String(error),
+      }).catch(() => {});
+
+      const errorMessage = resolveErrorMessage(language, error);
+      const edited = await safeEditMessage(
+        bot,
+        chatId,
+        statusMessage.message_id,
+        buildInlineNotice("⚠️", errorMessage)
+      );
+
+      if (!edited) {
+        await bot.sendMessage(chatId, buildInlineNotice("⚠️", errorMessage), { parse_mode: "HTML" });
+      }
+    } finally {
+      if (preparedMedia?.cleanup) {
+        await preparedMedia.cleanup();
+      }
+
+      await syncDashboard(io);
     }
   });
 
-  // --- 🔘 BUTTON HANDLER ---
   bot.on("callback_query", async (query) => {
-    const chatId = query.message.chat.id;
+    const message = query.message;
+    const sender = query.from || {};
     const action = query.data;
 
-    if (action === "cmd_start") {
-        bot.editMessageText("👋 **Welcome back!** Send a link to download.", { chat_id: chatId, message_id: query.message.message_id, parse_mode: "Markdown", ...mainMenu });
+    if (!message || !sender.id) {
+      await bot.answerCallbackQuery(query.id);
+      return;
     }
 
-    if (action === "menu_donate_select") {
-        bot.editMessageText("💖 **Select Currency:**", { chat_id: chatId, message_id: query.message.message_id, parse_mode: "Markdown", ...currencyMenu });
+    const chatId = message.chat.id;
+    const currentUser = await getOrCreateUser(sender);
+    const language = resolveLanguage(currentUser, sender);
+
+    recordUserActivity(
+      { id: sender.id, firstName: sender.first_name, username: sender.username },
+      { lastLink: currentUser?.lastLink || null }
+    );
+
+    if (currentUser?.isBlocked) {
+      await bot.answerCallbackQuery(query.id, {
+        text: t(language, "status.blocked"),
+        show_alert: true,
+      });
+      await syncDashboard(io);
+      return;
     }
 
-    if (action.startsWith("donate_final")) {
-        const isUSD = action.includes("usd");
-        const currency = isUSD ? khqrData.currency.usd : khqrData.currency.khr;
-        try {
-            const khqr = bakong.generateIndividual({
-                bakongAccountID: BAKONG_ACCOUNT, merchantName: MERCHANT_NAME, merchantCity: "Phnom Penh", acquiringBank: "Bakong", currency: currency, billNumber: `INV-${Date.now().toString().slice(-6)}`
-            });
-            if (khqr.status.code === 0) {
-                const card = await generateKHQRCard(khqr.data.qr, MERCHANT_NAME, currency);
-                bot.sendPhoto(chatId, card, { caption: `💸 **Donate via ${isUSD ? "USD" : "KHR"}**\nScan via ABA/Bakong.\n\n🔗 [PayWay Link](${PAYWAY_LINK})`, parse_mode: "Markdown" });
-            }
-        } catch (e) { bot.sendMessage(chatId, "❌ Error generating QR"); }
+    if (action === "menu_home") {
+      await showHome(bot, chatId, sender, language, message.message_id);
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await syncDashboard(io);
+      return;
     }
-    bot.answerCallbackQuery(query.id);
+
+    if (action === "menu_help") {
+      await showHelp(bot, chatId, language, message.message_id);
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await syncDashboard(io);
+      return;
+    }
+
+    if (action === "menu_language") {
+      await showLanguagePicker(bot, chatId, language, message.message_id);
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await syncDashboard(io);
+      return;
+    }
+
+    if (action === "menu_donate") {
+      await showDonateMenu(bot, chatId, language, message.message_id);
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await syncDashboard(io);
+      return;
+    }
+
+    if (action === "language_set_en" || action === "language_set_km") {
+      const nextLanguage = action.endsWith("_km") ? "km" : "en";
+      await setPreferredLanguage(sender, nextLanguage);
+      await bot.answerCallbackQuery(query.id, {
+        text: t(nextLanguage, "status.languageUpdated"),
+      });
+      await showHome(bot, chatId, sender, nextLanguage, message.message_id);
+      await syncDashboard(io);
+      return;
+    }
+
+    if (action === "donate_currency_usd" || action === "donate_currency_khr") {
+      const currencyCode = action.endsWith("_usd") ? "usd" : "khr";
+      await sendOrEdit(
+        bot,
+        chatId,
+        message.message_id,
+        [
+          buildSectionTitle("💸", t(language, "status.chooseAmount")),
+          `<i>${language === "km" ? "ជ្រើសរើសចំនួនទឹកប្រាក់ដែលអ្នកចង់គាំទ្របូត។" : "Pick the amount you want to support the bot with."}</i>`,
+        ].join("\n\n"),
+        createDonateAmountMenu(language, currencyCode)
+      );
+      await bot.answerCallbackQuery(query.id).catch(() => {});
+      await syncDashboard(io);
+      return;
+    }
+
+    const amountMatch = action.match(/^donate_amount_(usd|khr)_(\d+)$/);
+    if (amountMatch) {
+      const currencyCode = amountMatch[1];
+      const amount = Number(amountMatch[2]);
+      const currencyType = formatCurrencyPresetCode(currencyCode);
+      const expiresAt = Date.now() + DONATION_EXPIRY_MS;
+      const billNumber = `DN-${Date.now().toString(36).toUpperCase().slice(-8)}`;
+
+      try {
+        if (!BAKONG_ACCOUNT) {
+          await bot.answerCallbackQuery(query.id, {
+            text: t(language, "status.qrError"),
+            show_alert: true,
+          });
+          await syncDashboard(io);
+          return;
+        }
+
+        const khqr = bakong.generateIndividual({
+          bakongAccountID: BAKONG_ACCOUNT,
+          merchantName: MERCHANT_NAME,
+          merchantCity: "Phnom Penh",
+          acquiringBank: "Bakong",
+          currency: currencyType,
+          amount,
+          billNumber,
+          expirationTimestamp: expiresAt,
+          merchantCategoryCode: "5999",
+          purposeOfTransaction: "Support bot",
+        });
+
+        if (khqr.status.code === 0 && khqr.data?.qr && khqr.data?.md5) {
+          const donation = {
+            amount,
+            billNumber,
+            currencyCode,
+            currencyType,
+            expiresAt,
+            firstName: sender.first_name || sender.username || "friend",
+            merchantName: MERCHANT_NAME,
+            qrText: khqr.data.qr,
+            md5: khqr.data.md5,
+          };
+
+          const card = await generateKHQRCard(donation);
+          const sentPhoto = await bot.sendPhoto(chatId, card, {
+            caption: buildDonationCaption(language, donation),
+            parse_mode: "HTML",
+            ...createDonationStatusMenu(language, donation.md5),
+          });
+
+          await createDonationEvent(sender, {
+            ...donation,
+            language,
+            paywayLink: PAYWAY_LINK,
+            status: "pending",
+          }).catch((error) => {
+            console.error("Failed to persist donation event:", error.message || error);
+          });
+
+          await safeDeleteMessage(bot, chatId, message.message_id);
+
+          scheduleDonationCheck(
+            bot,
+            {
+              ...donation,
+              chatId,
+              language,
+              photoMessageId: sentPhoto.message_id,
+            },
+            io
+          );
+
+          await bot.answerCallbackQuery(query.id).catch(() => {});
+        } else {
+          await bot.answerCallbackQuery(query.id, {
+            text: t(language, "status.qrError"),
+            show_alert: true,
+          });
+        }
+      } catch (error) {
+        console.error("Failed to create KHQR donation:", error);
+        await bot.answerCallbackQuery(query.id, {
+          text: t(language, "status.qrError"),
+          show_alert: true,
+        });
+      }
+
+      await syncDashboard(io);
+      return;
+    }
+
+    const donateCheckMatch = action.match(/^donate_check_([a-f0-9]{32})$/i);
+    if (donateCheckMatch) {
+      const result = await runDonationStatusCheck(bot, donateCheckMatch[1], io);
+
+      await bot.answerCallbackQuery(query.id, {
+        text: result.callbackText,
+        show_alert: result.state !== "pending" && result.state !== "success",
+      }).catch(() => {});
+
+      await syncDashboard(io);
+      return;
+    }
+
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    await syncDashboard(io);
   });
 
   return bot;

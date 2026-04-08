@@ -18,14 +18,17 @@
   },
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "check:media-tools": "node scripts/check-media-tools.js",
+    "setup:media:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/setup-media-tools.ps1",
+    "setup:media:linux": "bash ./scripts/setup-media-tools.sh"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
   },
   "name": "bot",
   "version": "1.0.0",
-  "description": "A high-performance **Telegram Bot** that downloads TikTok videos **without watermarks**.  \r It features a **real-time web dashboard**, handles **large files via streaming**, and includes a **Cyberpunk-style UI**.",
+  "description": "Multi-platform Telegram media bot with bilingual UX, KHQR donations, and a responsive analytics dashboard.",
   "main": "bot.js",
   "keywords": [],
   "author": "",

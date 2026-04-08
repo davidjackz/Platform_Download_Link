@@ -1,14 +1,15 @@
-# Nexus TikTok Downloader Bot
+# Nexus Multi-Platform Media Bot
 
 <div align="center">
 
-Professional Telegram bot for downloading TikTok videos without watermarks, backed by MongoDB analytics and an EJS admin dashboard.
+Modern Telegram media bot with a polished chat UX, bilingual flows, KHQR donations, and a responsive analytics dashboard for operators.
 
 <p>
   <img src="https://img.shields.io/badge/Node.js-LTS-339933?logo=node.js&logoColor=white" alt="Node.js">
   <img src="https://img.shields.io/badge/Express-5.x-111827?logo=express&logoColor=white" alt="Express">
-  <img src="https://img.shields.io/badge/MongoDB-Tracked-47A248?logo=mongodb&logoColor=white" alt="MongoDB">
+  <img src="https://img.shields.io/badge/MongoDB-Mongoose-47A248?logo=mongodb&logoColor=white" alt="MongoDB">
   <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white" alt="Telegram">
+  <img src="https://img.shields.io/badge/Socket.IO-Live%20Dashboard-010101?logo=socket.io&logoColor=white" alt="Socket.IO">
   <img src="https://img.shields.io/badge/License-ISC-2563EB" alt="ISC License">
 </p>
 
@@ -19,63 +20,88 @@ Professional Telegram bot for downloading TikTok videos without watermarks, back
 ## Table of Contents
 
 - [Overview](#overview)
-- [Project Analysis](#project-analysis)
+- [What The Bot Does](#what-the-bot-does)
+- [Dashboard Modules](#dashboard-modules)
 - [Feature Highlights](#feature-highlights)
 - [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
+- [Media Runtime](#media-runtime)
 - [Environment Variables](#environment-variables)
-- [Run Modes](#run-modes)
-- [Customization Notes](#customization-notes)
+- [Donation Flow](#donation-flow)
+- [Bot Commands](#bot-commands)
+- [Deployment Notes](#deployment-notes)
 - [Implementation Notes](#implementation-notes)
 - [License](#license)
 
 ## Overview
 
-**What this project does**
+This project is no longer just a TikTok downloader. It is now a broader Telegram media workflow built around four core ideas:
 
-- Downloads TikTok videos through a Telegram bot workflow.
-- Uses a retry-based extractor that prefers HD playback when available.
-- Persists user activity and download counts in MongoDB.
-- Serves a styled admin dashboard with usage totals, recent users, and a 7-day growth chart.
-- Includes a donation flow powered by Bakong KHQR and a PayWay link.
+- `🤖` A Telegram bot that auto-detects supported links from normal chat messages.
+- `🎬` Video delivery for TikTok, Facebook, and Instagram reels or short links.
+- `🎵` YouTube to MP3 conversion with `yt-dlp` and `ffmpeg`.
+- `📊` A responsive admin dashboard with overview, users, donations, blocking controls, search, sorting, and filters.
 
-**Who this is for**
+The bot is designed for real operator usage instead of demo-only behavior. It stores user activity, download history, donation history, language preference, moderation state, and platform usage in MongoDB.
 
-- Developers building a Telegram utility bot.
-- Operators who want a simple analytics dashboard next to the bot runtime.
-- Teams looking for a deployable Node.js starter that supports both local polling and production webhooks.
+## What The Bot Does
 
-## Project Analysis
+### User experience
 
-This repository is organized around three core runtime pieces:
+- `✨` `/start` opens a richer welcome screen with icon-first actions and feature overview.
+- `🌐` Users can switch between English and Khmer.
+- `🔗` The bot extracts the first supported URL from a message automatically.
+- `📦` TikTok, Facebook, and Instagram are returned as video.
+- `🎧` YouTube links are converted and returned as MP3.
+- `🧾` Returned media includes the original source link in the caption.
+- `❤️` Donations can be created through KHQR, checked automatically, and tracked in the dashboard.
 
-| Area | Responsibility | Main File |
+### Supported links
+
+| Platform | Input examples | Output |
 | --- | --- | --- |
-| Bot runtime | Handles Telegram commands, TikTok links, donations, and user updates | `bot.js` |
-| Download service | Calls the external TikTok API, retries failures, and selects the media URL | `downloader.js` |
-| Web server | Hosts the dashboard, receives Telegram webhooks, and connects MongoDB | `server.js` |
+| TikTok | `tiktok.com/...`, `vm.tiktok.com/...` | Video |
+| Facebook | `facebook.com/...`, `fb.watch/...` | Video |
+| Instagram | `instagram.com/reel/...`, `instagram.com/p/...` | Video |
+| YouTube | `youtube.com/watch?...`, `youtube.com/shorts/...`, `youtu.be/...` | MP3 |
 
-**Code-level observations**
+## Dashboard Modules
 
-- The bot switches automatically between `polling` for local development and `webhook` mode for public deployments.
-- User data is stored in MongoDB through a single `User` model with `downloads`, `joinedAt`, and `lastActive` fields.
-- The dashboard UI is visually polished and uses Tailwind CSS, Chart.js, Socket.IO, and EJS server rendering.
-- Donation support is already integrated and generates branded KHQR cards on demand.
-- The current dashboard includes Socket.IO client wiring, but the backend does not yet broadcast live stat updates.
+The dashboard is built as a small admin app with a left sidebar and three main sections:
+
+### `📈 Dashboard`
+
+- total users, downloads, failures, active users, donation totals
+- 7-day charts for signups, downloads, failures, and donations
+- platform, media type, language, donation status, and currency breakdowns
+- recent activity panels for downloads and donations
+
+### `👤 Users`
+
+- full user list with download and donation metrics
+- block and unblock actions
+- search by name, username, or Telegram ID
+- sort and filter by status, language, and day window
+- responsive table on desktop and cards on mobile
+
+### `💸 Donations`
+
+- persistent donation history in MongoDB
+- success, pending, expired, failed, and auth-error states
+- search, sort, and filter by currency, status, and date
+- quick operator visibility into KHQR activity
 
 ## Feature Highlights
 
-| Icon | Capability | Current Behavior |
-| --- | --- | --- |
-| :clapper: | TikTok download flow | Accepts TikTok URLs from Telegram chat and returns the downloadable video |
-| :brain: | Smart media selection | Prefers HD output, then falls back to normal quality if the file is too large |
-| :repeat: | Retry strategy | Retries extractor requests up to 100 times with rotating user agents |
-| :bar_chart: | Analytics dashboard | Displays total downloads, user totals, recent users, and a weekly chart |
-| :floppy_disk: | MongoDB tracking | Stores unique Telegram users and increments per-user download counts |
-| :moneybag: | Donation support | Generates Bakong KHQR payment cards and shares a PayWay link |
-| :globe_with_meridians: | Dual runtime mode | Uses polling locally and webhooks in a deployed environment |
+| Area | Details |
+| --- | --- |
+| Bot UX | Icon-first menus, styled HTML text, bilingual replies, guided `/start` flow |
+| Media engine | Smart URL detection, platform routing, temp-file cleanup, size guardrails |
+| Donation system | KHQR card generation, 3-minute expiry, 3-second auto-check, thank-you confirmation |
+| Moderation | User block/unblock from dashboard and bot-side enforcement |
+| Analytics | User records, download events, donation events, active-user memory cache |
+| Dashboard UI | Left sidebar, responsive layout, live sync through Socket.IO, simple clean styling |
 
 ## Architecture
 
@@ -83,48 +109,58 @@ This repository is organized around three core runtime pieces:
 flowchart LR
     U["Telegram User"] --> T["Telegram Bot API"]
     T --> B["bot.js"]
-    B --> D["downloader.js"]
-    D --> X["tikwm.com API"]
-    B --> M["MongoDB"]
-    S["server.js"] --> M
-    S --> V["EJS Dashboard"]
-    S --> W["POST /bot<TOKEN> Webhook"]
-    V --> C["Chart.js + Socket.IO Client"]
+    B --> P["utils/platform.js"]
+    B --> M["services/media-service.js"]
+    M --> Y["yt-dlp"]
+    M --> F["ffmpeg"]
+    B --> US["services/user-service.js"]
+    US --> DB["MongoDB"]
+    B --> DS["services/donation-service.js"]
+    B --> BK["services/bakong-service.js"]
+    DS --> DB
+    S["server.js"] --> DD["dashboard-data.js"]
+    DD --> DB
+    S --> V["views/dashboard.ejs"]
+    S --> IO["Socket.IO"]
+    IO --> V
 ```
-
-**Runtime flow**
-
-1. A user sends a TikTok URL to the Telegram bot.
-2. `bot.js` calls `getTikTokData()` from `downloader.js`.
-3. The extractor requests metadata from `tikwm.com`, selects the best playable media URL, and returns it.
-4. The bot sends the video back to Telegram and updates the MongoDB user record.
-5. `server.js` renders dashboard metrics from MongoDB and exposes the webhook endpoint for production use.
-
-## Tech Stack
-
-| Layer | Tools |
-| --- | --- |
-| Backend | Node.js, Express 5, body-parser, compression |
-| Bot | node-telegram-bot-api |
-| Database | MongoDB, Mongoose |
-| Dashboard | EJS, Tailwind CSS CDN, Chart.js, Socket.IO |
-| Media / Payments | Axios, canvas, qrcode, bakong-khqr |
-| Dev tooling | Nodemon, dotenv |
 
 ## Project Structure
 
 ```text
 botdownloadtiktok/
 |-- bot.js
-|-- downloader.js
 |-- server.js
-|-- models/
-|   \-- User.js
+|-- downloader.js
+|-- dashboard-data.js
+|-- dashboard.css
+|-- dashboard.js
 |-- views/
 |   \-- dashboard.ejs
-|-- .gitignore
+|-- models/
+|   |-- User.js
+|   |-- DownloadEvent.js
+|   \-- DonationEvent.js
+|-- services/
+|   |-- media-service.js
+|   |-- runtime-tools.js
+|   |-- user-service.js
+|   |-- donation-service.js
+|   \-- bakong-service.js
+|-- utils/
+|   \-- platform.js
+|-- locales/
+|   \-- messages.js
+|-- scripts/
+|   |-- check-media-tools.js
+|   |-- setup-media-tools.ps1
+|   \-- setup-media-tools.sh
+|-- bin/
+|   |-- yt-dlp.exe
+|   \-- ffmpeg.exe
 |-- package.json
 |-- package-lock.json
+|-- .env
 \-- README.md
 ```
 
@@ -134,8 +170,10 @@ botdownloadtiktok/
 
 - Node.js LTS
 - npm
-- MongoDB database
+- MongoDB or MongoDB Atlas
 - Telegram bot token from BotFather
+- `yt-dlp`
+- `ffmpeg`
 
 ### 2. Install dependencies
 
@@ -143,71 +181,162 @@ botdownloadtiktok/
 npm install
 ```
 
-### 3. Create a `.env` file
+### 3. Check the media runtime
+
+```bash
+npm run check:media-tools
+```
+
+If the tools are missing, run one of these:
+
+```bash
+npm run setup:media:windows
+```
+
+```bash
+npm run setup:media:linux
+```
+
+### 4. Create `.env`
+
+Copy `.env.example` to `.env`, then fill in your real values.
 
 ```env
 TELEGRAM_TOKEN=your_telegram_bot_token
 MONGO_URI=your_mongodb_connection_string
 PORT=3000
 RENDER_EXTERNAL_URL=
-BAKONG_ACCOUNT_ID=your_bakong_account_id
+
+BAKONG_ACCOUNT_ID=your_bakong_account
 MERCHANT_NAME=Your Merchant Name
+BAKONG_API_TOKEN=your_bakong_api_token
+BAKONG_API_EMAIL=your_bakong_registered_email
+BAKONG_API_BASE_URL=https://api-bakong.nbc.gov.kh
+
+PAYWAY_LINK=https://link.payway.com.kh/your-link
+GITHUB_LINK=https://github.com/your-repo
+SUPPORT_LINK=https://t.me/your-support-account
+
+YTDLP_BIN=
+FFMPEG_BIN=
 ```
 
-### 4. Start the app
+### 5. Start locally
 
 ```bash
 npm run dev
 ```
 
-### 5. Open the dashboard
+### 6. Open the dashboard
 
 ```text
 http://localhost:3000
 ```
 
-### 6. Use the bot
+## Media Runtime
 
-- Send `/start` to initialize the conversation.
-- Send a TikTok link to trigger a download.
-- Use `/help`, `/source`, or `/contact` for the built-in utility commands.
+The media pipeline depends on external binaries:
+
+| Tool | Purpose | Required for |
+| --- | --- | --- |
+| `yt-dlp` | Download and extract platform media | All supported platforms |
+| `ffmpeg` | Convert source media into MP3 | YouTube audio flow |
+
+Runtime resolution order:
+
+1. `YTDLP_BIN` / `FFMPEG_BIN`
+2. local `./bin`
+3. local `./vendor`
+4. system `PATH`
+
+Useful commands:
+
+```bash
+npm run check:media-tools
+```
+
+```bash
+npm run setup:media:windows
+```
+
+```bash
+npm run setup:media:linux
+```
 
 ## Environment Variables
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `TELEGRAM_TOKEN` | Yes | Telegram bot token used by the bot runtime and webhook route |
-| `MONGO_URI` | Yes | MongoDB connection string for analytics and user tracking |
-| `PORT` | No | HTTP port for the Express server, default is `3000` |
-| `RENDER_EXTERNAL_URL` | No | Public base URL for deployed webhook mode |
-| `BAKONG_ACCOUNT_ID` | Optional | Required if the Bakong donation flow should work |
-| `MERCHANT_NAME` | Optional | Display name used on generated KHQR cards |
+| `TELEGRAM_TOKEN` | Yes | Telegram bot token |
+| `MONGO_URI` | Yes | MongoDB connection string |
+| `PORT` | No | HTTP server port, default `3000` |
+| `RENDER_EXTERNAL_URL` | No | Public URL for webhook deployments |
+| `BAKONG_ACCOUNT_ID` | Optional | Merchant Bakong account used to generate KHQR |
+| `MERCHANT_NAME` | Optional | Merchant name printed on the KHQR card |
+| `BAKONG_API_TOKEN` | Optional | Used for `check_transaction_by_md5` verification |
+| `BAKONG_API_EMAIL` | Optional | Used to renew Bakong API token automatically |
+| `BAKONG_API_BASE_URL` | No | Overrides Bakong API base URL |
+| `PAYWAY_LINK` | Optional | Backup payment link shown in donation caption |
+| `GITHUB_LINK` | Optional | Used in `/source` and menu source button |
+| `SUPPORT_LINK` | Optional | Used in `/contact` and menu support button |
+| `YTDLP_BIN` | Optional | Absolute path to a custom `yt-dlp` binary |
+| `FFMPEG_BIN` | Optional | Absolute path to a custom `ffmpeg` binary |
 
-## Run Modes
+## Donation Flow
 
-| Mode | Trigger | Behavior |
-| --- | --- | --- |
-| Local development | `RENDER_EXTERNAL_URL` is empty or resolves to `localhost` | Bot starts in Telegram polling mode |
-| Cloud deployment | `RENDER_EXTERNAL_URL` is set to a public URL | Bot registers a Telegram webhook at `/bot<TOKEN>` |
+The donation UX is designed as a guided Telegram flow:
 
-## Customization Notes
+1. User opens `Donate`
+2. User selects currency
+3. User selects amount
+4. Bot generates a branded KHQR card
+5. Bot checks payment every `3 seconds`
+6. QR expires after `3 minutes`
+7. On success, the bot deletes the QR card and sends an automatic thank-you message
 
-Project-specific branding and links are currently defined directly in `bot.js`.
+Donation records are stored in MongoDB with status, amount, bill number, md5, timestamps, and verification results.
 
-- `GITHUB_LINK` controls the `/source` command target.
-- `PAYWAY_LINK` controls the payment shortcut shared in donation responses.
-- Support contact links and email text are also hardcoded in the command handlers.
-- Dashboard branding such as "NexusBot" and "Mission Control" lives in `views/dashboard.ejs`.
+## Bot Commands
+
+| Command | Purpose |
+| --- | --- |
+| `/start` | Show welcome screen and feature summary |
+| `/help` | Show supported platforms and quick guidance |
+| `/language` | Switch between English and Khmer |
+| `/donate` | Open currency and amount selection for KHQR donations |
+| `/source` | Open repository link |
+| `/contact` | Open support link |
+
+## Deployment Notes
+
+### Local mode
+
+If `RENDER_EXTERNAL_URL` is empty or points to localhost, the bot runs in Telegram polling mode.
+
+### Public deployment mode
+
+If `RENDER_EXTERNAL_URL` is a public URL, the bot registers a Telegram webhook at:
+
+```text
+/bot<TELEGRAM_TOKEN>
+```
+
+### Recommended production stack
+
+- AWS EC2 or similar VM
+- MongoDB Atlas
+- PM2
+- Nginx
 
 ## Implementation Notes
 
-These details are worth knowing before production rollout:
-
-- Socket.IO is initialized and the dashboard client listens for `update_stats`, but the current backend does not emit that event yet.
-- `state.userList` exists for active session tracking, but it is not populated in the current bot flow, so live presence widgets stay empty.
-- The bot depends on the third-party `tikwm.com` API for TikTok extraction, so availability and response quality depend on that upstream service.
-- This repository currently does not include an automated test suite.
+- The dashboard now uses custom EJS, CSS, Chart.js, and Socket.IO. It is not using the older Tailwind-only approach.
+- User state, download history, and donation history are all persisted in MongoDB.
+- Donation history only exists from the version that introduced `DonationEvent` onward unless older data is backfilled.
+- Media preparation writes to a temp directory, then cleans it up after Telegram upload or failure.
+- YouTube is intentionally treated as `audio`; the current flow converts it to MP3 instead of returning video.
+- Telegram upload limits still apply, so very large source files can fail even when the original media is valid.
 
 ## License
 
-This project is currently licensed as `ISC` in `package.json`.
+This project is licensed under the `ISC` license.
