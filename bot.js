@@ -886,18 +886,29 @@ async function showDonateMenu(bot, chatId, language, messageId) {
 const setupBot = (token, domain, createTempLink, io) => {
   let bot;
   const bakong = new BakongKHQR();
+  const isCloudMode = Boolean(domain && !domain.includes("localhost"));
 
-  if (domain && !domain.includes("localhost")) {
+  if (isCloudMode) {
     console.log("CLOUD MODE: Webhook active");
     bot = new TelegramBot(token);
-    bot.setWebHook(`${domain}/bot${token}`).catch((error) => {
-      console.error("Failed to register webhook:", error.message || error);
-    });
   } else {
     console.log("LOCAL MODE: Polling active");
     bot = new TelegramBot(token, { polling: true });
     bot.deleteWebHook().catch(() => {});
   }
+
+  bot.registerWebhook = async () => {
+    if (!isCloudMode) {
+      return null;
+    }
+
+    const webhookUrl = `${domain}/bot${token}`;
+    console.log(`Registering webhook at ${webhookUrl}`);
+
+    return bot.setWebHook(webhookUrl, {
+      drop_pending_updates: true,
+    });
+  };
 
   bot.on("polling_error", (error) => {
     console.error("Telegram polling error:", error.code || error.message || error);

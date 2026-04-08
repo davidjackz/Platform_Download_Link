@@ -124,7 +124,12 @@ app.post("/api/users/:telegramId/unblock", async (req, res) => {
   }
 });
 
-app.post(`/bot${TOKEN}`, (req, res) => {
+app.post("/bot:token", (req, res) => {
+  if (req.params.token !== TOKEN) {
+    res.sendStatus(403);
+    return;
+  }
+
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
@@ -137,6 +142,15 @@ process.on("unhandledRejection", (reason) => {
   console.error("Unhandled rejection", reason);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+
+  if (typeof bot.registerWebhook === "function") {
+    try {
+      await bot.registerWebhook();
+      console.log("Webhook registration completed.");
+    } catch (error) {
+      console.error("Failed to register webhook:", error.message || error);
+    }
+  }
 });
