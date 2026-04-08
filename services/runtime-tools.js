@@ -56,7 +56,15 @@ function isFileCandidate(candidate) {
   return Boolean(candidate) && (path.isAbsolute(candidate) || candidate.includes(path.sep));
 }
 
-function probeBinary(command, args = ["--version"]) {
+function getProbeArgs(tool) {
+  if (tool === "ffmpeg") {
+    return ["-version"];
+  }
+
+  return ["--version"];
+}
+
+function probeBinary(command, args) {
   return new Promise((resolve) => {
     let child;
 
@@ -111,6 +119,7 @@ function probeBinary(command, args = ["--version"]) {
 async function resolveToolBinary(tool) {
   const candidates = buildCandidates(tool);
   const attempts = [];
+  const probeArgs = getProbeArgs(tool);
 
   for (const candidate of candidates) {
     if (!canAttempt(candidate)) {
@@ -118,7 +127,7 @@ async function resolveToolBinary(tool) {
       continue;
     }
 
-    const result = await probeBinary(candidate);
+    const result = await probeBinary(candidate, probeArgs);
     attempts.push({ candidate, ...result });
 
     if (result.ok) {
