@@ -10,6 +10,7 @@ const {
   inferMediaType,
   normalizeLanguage,
   prepareMediaDownload,
+  resolveDirectMediaUrl,
 } = require("./downloader");
 const { DEFAULT_LANGUAGE, LANGUAGE_LABELS, t } = require("./locales/messages");
 const {
@@ -62,6 +63,7 @@ const MAX_PENDING_DOWNLOADS = Math.max(
   DOWNLOAD_CONCURRENCY,
   Number(process.env.MAX_PENDING_DOWNLOADS || 20)
 );
+const ENABLE_DIRECT_VIDEO_FAST_PATH = process.env.ENABLE_DIRECT_VIDEO_FAST_PATH !== "false";
 
 const pendingDonations = new Map();
 const pendingDownloadJobs = [];
@@ -494,8 +496,52 @@ async function sendCachedMedia(bot, job, cachedMedia) {
   }
 }
 
+async function tryDirectVideoDelivery(bot, job) {
+  if (!ENABLE_DIRECT_VIDEO_FAST_PATH || job.mediaType !== "video") {
+    return null;
+  }
+
+  let resolved;
+
+  try {
+    await safeEditMessage(
+      bot,
+      job.chatId,
+      job.statusMessageId,
+      buildProgressMessage(
+        "🚀",
+        job.language === "km" ? "កំពុងផ្ញើវីដេអូលឿន" : "Fast Video Delivery",
+        job.language === "km"
+          ? "កំពុងព្យាយាមផ្ញើវីដេអូដោយផ្ទាល់ទៅ Telegram..."
+          : "Trying a direct-to-Telegram video delivery path..."
+      )
+    );
+
+    resolved = await resolveDirectMediaUrl(job.trackedUrl);
+    if (!resolved?.directUrl) {
+      return null;
+    }
+
+    return await bot.sendVideo(job.chatId, resolved.directUrl, {
+      caption: buildCaption(job.language, job.trackedUrl),
+      parse_mode: "HTML",
+      supports_streaming: true,
+    });
+  } catch (error) {
+    const errorMessage = String(error?.message || error || "");
+    const isRecoverable = /failed to get http url content|wrong file identifier|request failed|ETELEGRAM|status code 400|status code 413|status code 429|timed out|socket hang up|econnreset|invalid url|bad request/i.test(errorMessage);
+
+    if (isRecoverable) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 async function processDownloadJob(bot, job, io) {
   let preparedMedia = null;
+  let sentMessage = null;
 
   try {
     const cachedMedia = await findReusableMedia(job.trackedUrl, job.platform.key, job.mediaType);
@@ -524,6 +570,44 @@ async function processDownloadJob(bot, job, io) {
       }
     }
 
+    sentMessage = await tryDirectVideoDelivery(bot, job);
+
+    if (sentMessage) {
+      await safeDeleteMessage(bot, job.chatId, job.statusMessageId);
+
+      const telegramMedia = extractTelegramMediaReference(sentMessage, job.mediaType);
+      if (telegramMedia?.fileId) {
+        runInBackground(async () => {
+          await saveReusableMedia({
+            url: job.trackedUrl,
+            platform: job.platform.key,
+            mediaType: job.mediaType,
+            telegramFileId: telegramMedia.fileId,
+            telegramFileUniqueId: telegramMedia.fileUniqueId,
+            title: null,
+            uploader: null,
+            fileName: null,
+            fileSizeBytes: null,
+          });
+        }, "Direct video cache save");
+      }
+
+      runInBackground(async () => {
+        await recordSuccessfulDownload(job.sender, {
+          sourceUrl: job.trackedUrl,
+          platform: job.platform.key,
+          mediaType: job.mediaType,
+          title: null,
+          fileName: null,
+          fileSizeBytes: null,
+          language: job.language,
+        });
+        syncDashboard(io);
+      }, "Direct video tracking");
+
+      return;
+    }
+
     await safeEditMessage(
       bot,
       job.chatId,
@@ -549,7 +633,6 @@ async function processDownloadJob(bot, job, io) {
       preparedMedia.mediaType === "audio" ? "upload_audio" : "upload_video"
     );
 
-    let sentMessage;
     if (preparedMedia.mediaType === "audio") {
       sentMessage = await bot.sendAudio(job.chatId, preparedMedia.filePath, {
         caption: buildCaption(job.language, job.trackedUrl),

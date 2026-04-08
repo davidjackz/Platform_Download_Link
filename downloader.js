@@ -1,4 +1,9 @@
-const { prepareMediaDownload, MediaServiceError, MAX_FILE_SIZE_BYTES } = require("./services/media-service");
+const {
+  prepareMediaDownload,
+  resolveDirectMediaUrl,
+  MediaServiceError,
+  MAX_FILE_SIZE_BYTES,
+} = require("./services/media-service");
 const {
   detectPlatform,
   extractFirstSupportedUrl,
@@ -10,6 +15,7 @@ const {
 
 module.exports = {
   prepareMediaDownload,
+  resolveDirectMediaUrl,
   MediaServiceError,
   MAX_FILE_SIZE_BYTES,
   detectPlatform,

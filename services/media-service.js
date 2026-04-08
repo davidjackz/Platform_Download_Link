@@ -16,6 +16,7 @@ const {
 } = require("./runtime-tools");
 
 const MAX_FILE_SIZE_BYTES = 48 * 1024 * 1024;
+const VIDEO_FORMAT_SELECTOR = "best[ext=mp4][height<=720]/best[height<=720]/best";
 const IGNORED_DOWNLOAD_SUFFIXES = [
   ".info.json",
   ".description",
@@ -159,9 +160,20 @@ function buildDownloadArgs({ mediaType, outputTemplate, url }) {
   return [
     ...commonArgs,
     "--format",
-    "best[ext=mp4][height<=720]/best[height<=720]/best",
+    VIDEO_FORMAT_SELECTOR,
     "--max-filesize",
     "48M",
+    url,
+  ];
+}
+
+function buildDirectUrlArgs(url) {
+  return [
+    "--no-playlist",
+    "--no-warnings",
+    "--format",
+    VIDEO_FORMAT_SELECTOR,
+    "--get-url",
     url,
   ];
 }
@@ -248,8 +260,43 @@ async function prepareMediaDownload(inputUrl) {
   }
 }
 
+async function resolveDirectMediaUrl(inputUrl) {
+  const sourceUrl = normalizeUrl(inputUrl);
+  const platform = detectPlatform(sourceUrl);
+
+  if (!sourceUrl || !platform) {
+    throw new MediaServiceError("Unsupported URL.", "UNSUPPORTED_URL");
+  }
+
+  const mediaType = inferMediaType(platform.key);
+  if (mediaType !== "video") {
+    return null;
+  }
+
+  const runtime = await ensureMediaRuntime({ audioRequired: false });
+  const ytDlpBinary = runtime.ytDlpBinary;
+  const { stdout } = await runCommand(ytDlpBinary, buildDirectUrlArgs(sourceUrl));
+  const directUrl = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (!directUrl) {
+    throw new MediaServiceError("Unable to resolve direct media URL.", "DIRECT_URL_MISSING");
+  }
+
+  return {
+    sourceUrl,
+    directUrl,
+    platform: platform.key,
+    platformLabel: getPlatformLabel(platform.key),
+    mediaType,
+  };
+}
+
 module.exports = {
   MAX_FILE_SIZE_BYTES,
   MediaServiceError,
   prepareMediaDownload,
+  resolveDirectMediaUrl,
 };
