@@ -325,12 +325,51 @@ function createDonationStatusMenu(language, md5) {
   };
 }
 
-async function syncDashboard(io) {
-  try {
-    await emitDashboardUpdate(io);
-  } catch (error) {
-    console.error("Dashboard sync failed:", error.message);
+let dashboardSyncTimer = null;
+let dashboardSyncInFlight = false;
+let dashboardSyncRequested = false;
+
+function syncDashboard(io, delay = 400) {
+  if (!io) {
+    return;
   }
+
+  dashboardSyncRequested = true;
+
+  if (dashboardSyncTimer || dashboardSyncInFlight) {
+    return;
+  }
+
+  dashboardSyncTimer = setTimeout(async () => {
+    dashboardSyncTimer = null;
+
+    if (!dashboardSyncRequested) {
+      return;
+    }
+
+    dashboardSyncRequested = false;
+    dashboardSyncInFlight = true;
+
+    try {
+      await emitDashboardUpdate(io);
+    } catch (error) {
+      console.error("Dashboard sync failed:", error.message);
+    } finally {
+      dashboardSyncInFlight = false;
+
+      if (dashboardSyncRequested) {
+        syncDashboard(io, delay);
+      }
+    }
+  }, delay);
+}
+
+function runInBackground(task, label) {
+  Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      console.error(`${label} failed:`, error.message || error);
+    });
 }
 
 function drawRoundedRect(ctx, x, y, width, height, radius) {
@@ -1019,12 +1058,6 @@ const setupBot = (token, domain, createTempLink, io) => {
       return;
     }
 
-    await recordDownloadRequest(sender, {
-      sourceUrl: trackedUrl,
-      platform: platform.key,
-      language,
-    });
-
     const mediaType = inferMediaType(platform.key);
     const statusMessage = await bot.sendMessage(
       chatId,
@@ -1035,6 +1068,15 @@ const setupBot = (token, domain, createTempLink, io) => {
       ].join("\n"),
       { parse_mode: "HTML" }
     );
+
+    runInBackground(async () => {
+      await recordDownloadRequest(sender, {
+        sourceUrl: trackedUrl,
+        platform: platform.key,
+        language,
+      });
+      syncDashboard(io);
+    }, "Download request tracking");
 
     let preparedMedia = null;
 
@@ -1070,28 +1112,34 @@ const setupBot = (token, domain, createTempLink, io) => {
 
       await bot.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
 
-      await recordSuccessfulDownload(sender, {
-        sourceUrl: trackedUrl,
-        platform: preparedMedia.platform,
-        mediaType: preparedMedia.mediaType,
-        title: preparedMedia.title,
-        fileName: preparedMedia.fileName,
-        fileSizeBytes: preparedMedia.fileSizeBytes,
-        language,
-      });
+      runInBackground(async () => {
+        await recordSuccessfulDownload(sender, {
+          sourceUrl: trackedUrl,
+          platform: preparedMedia.platform,
+          mediaType: preparedMedia.mediaType,
+          title: preparedMedia.title,
+          fileName: preparedMedia.fileName,
+          fileSizeBytes: preparedMedia.fileSizeBytes,
+          language,
+        });
+        syncDashboard(io);
+      }, "Successful download tracking");
     } catch (error) {
       console.error(error);
 
-      await recordFailedDownload(sender, {
-        sourceUrl: trackedUrl,
-        platform: platform.key,
-        mediaType,
-        title: `${platform.label} request failed`,
-        fileName: preparedMedia?.fileName || null,
-        fileSizeBytes: preparedMedia?.fileSizeBytes || null,
-        language,
-        errorMessage: error.message || String(error),
-      }).catch(() => {});
+      runInBackground(async () => {
+        await recordFailedDownload(sender, {
+          sourceUrl: trackedUrl,
+          platform: platform.key,
+          mediaType,
+          title: `${platform.label} request failed`,
+          fileName: preparedMedia?.fileName || null,
+          fileSizeBytes: preparedMedia?.fileSizeBytes || null,
+          language,
+          errorMessage: error.message || String(error),
+        });
+        syncDashboard(io);
+      }, "Failed download tracking");
 
       const errorMessage = resolveErrorMessage(language, error);
       const edited = await safeEditMessage(
@@ -1109,7 +1157,7 @@ const setupBot = (token, domain, createTempLink, io) => {
         await preparedMedia.cleanup();
       }
 
-      await syncDashboard(io);
+      syncDashboard(io);
     }
   });
 

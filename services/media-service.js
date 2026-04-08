@@ -16,6 +16,20 @@ const {
 } = require("./runtime-tools");
 
 const MAX_FILE_SIZE_BYTES = 48 * 1024 * 1024;
+const IGNORED_DOWNLOAD_SUFFIXES = [
+  ".info.json",
+  ".description",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".part",
+  ".temp",
+  ".vtt",
+  ".srt",
+  ".ass",
+  ".lrc",
+];
 
 class MediaServiceError extends Error {
   constructor(message, code = "MEDIA_ERROR", details = null) {
@@ -71,60 +85,80 @@ async function safeRemove(targetPath) {
   await fs.promises.rm(targetPath, { recursive: true, force: true }).catch(() => {});
 }
 
-async function readMetadata(ytDlpBinary, url) {
-  const { stdout } = await runCommand(ytDlpBinary, [
-    "--dump-single-json",
-    "--skip-download",
-    "--no-playlist",
-    "--no-warnings",
-    url,
-  ]);
-
-  try {
-    return JSON.parse(stdout);
-  } catch (error) {
-    throw new MediaServiceError("Unable to parse media metadata.", "BAD_METADATA");
-  }
-}
-
-async function findSingleFile(directoryPath) {
+async function findDownloadArtifacts(directoryPath) {
   const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
-  const fileEntry = entries.find((entry) => entry.isFile());
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(directoryPath, entry.name));
 
-  if (!fileEntry) {
+  const infoPath = files.find((filePath) => filePath.toLowerCase().endsWith(".info.json")) || null;
+  const mediaPath = files.find((filePath) => {
+    const lowerPath = filePath.toLowerCase();
+    return !IGNORED_DOWNLOAD_SUFFIXES.some((suffix) => lowerPath.endsWith(suffix));
+  });
+
+  if (!mediaPath) {
     throw new MediaServiceError("The downloader did not create an output file.", "FILE_NOT_FOUND");
   }
 
-  return path.join(directoryPath, fileEntry.name);
+  return {
+    mediaPath,
+    infoPath,
+  };
+}
+
+async function readMetadataFromInfoFile(infoPath, fallbackTitle) {
+  if (!infoPath) {
+    return {
+      title: fallbackTitle,
+      uploader: null,
+    };
+  }
+
+  try {
+    const raw = await fs.promises.readFile(infoPath, "utf8");
+    const metadata = JSON.parse(raw);
+
+    return {
+      title: metadata.title || metadata.fulltitle || fallbackTitle,
+      uploader: metadata.uploader || metadata.channel || metadata.artist || null,
+    };
+  } catch (error) {
+    return {
+      title: fallbackTitle,
+      uploader: null,
+    };
+  }
 }
 
 function buildDownloadArgs({ mediaType, outputTemplate, url }) {
+  const commonArgs = [
+    "--no-playlist",
+    "--no-warnings",
+    "--restrict-filenames",
+    "--write-info-json",
+    "--output",
+    outputTemplate,
+  ];
+
   if (mediaType === "audio") {
     return [
-      "--no-playlist",
-      "--no-warnings",
-      "--restrict-filenames",
+      ...commonArgs,
       "--extract-audio",
       "--audio-format",
       "mp3",
       "--audio-quality",
       "0",
-      "--output",
-      outputTemplate,
       url,
     ];
   }
 
   return [
-    "--no-playlist",
-    "--no-warnings",
-    "--restrict-filenames",
+    ...commonArgs,
     "--format",
     "best[ext=mp4][height<=720]/best[height<=720]/best",
     "--max-filesize",
     "48M",
-    "--output",
-    outputTemplate,
     url,
   ];
 }
@@ -163,8 +197,6 @@ async function prepareMediaDownload(inputUrl) {
   const runtime = await ensureMediaRuntime({ audioRequired: mediaType === "audio" });
   const ytDlpBinary = runtime.ytDlpBinary;
   const ffmpegBinary = runtime.ffmpegBinary;
-
-  const metadata = await readMetadata(ytDlpBinary, sourceUrl);
   const tempDirectory = path.join(os.tmpdir(), `botdownload-${randomUUID()}`);
   await fs.promises.mkdir(tempDirectory, { recursive: true });
 
@@ -181,8 +213,12 @@ async function prepareMediaDownload(inputUrl) {
 
   try {
     await runCommand(ytDlpBinary, args);
-    const filePath = await findSingleFile(tempDirectory);
+    const { mediaPath: filePath, infoPath } = await findDownloadArtifacts(tempDirectory);
     const stats = await fs.promises.stat(filePath);
+    const metadata = await readMetadataFromInfoFile(
+      infoPath,
+      `${getPlatformLabel(platform.key)} media`
+    );
 
     if (stats.size > MAX_FILE_SIZE_BYTES) {
       throw new MediaServiceError(
@@ -196,8 +232,8 @@ async function prepareMediaDownload(inputUrl) {
       filePath,
       fileName: path.basename(filePath),
       fileSizeBytes: stats.size,
-      title: metadata.title || metadata.fulltitle || `${getPlatformLabel(platform.key)} media`,
-      uploader: metadata.uploader || metadata.channel || metadata.artist || null,
+      title: metadata.title,
+      uploader: metadata.uploader,
       platform: platform.key,
       platformLabel: getPlatformLabel(platform.key),
       mediaType,
