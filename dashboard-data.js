@@ -7,9 +7,16 @@ const User = require("./models/User");
 const { getPlatformLabel, getSupportedPlatformList } = require("./utils/platform");
 
 const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
+const DASHBOARD_CACHE_MS = Math.max(1000, Number(process.env.DASHBOARD_CACHE_MS || 10000));
 
 const state = {
   userList: [],
+};
+
+const dashboardCache = {
+  payload: null,
+  expiresAt: 0,
+  promise: null,
 };
 
 function getDisplayName(user = {}) {
@@ -232,7 +239,7 @@ function buildFallbackDashboard() {
   };
 }
 
-async function getDashboardData() {
+async function buildDashboardData() {
   pruneActiveUsers();
 
   if (mongoose.connection.readyState !== 1) {
@@ -576,8 +583,37 @@ async function getDashboardData() {
   };
 }
 
-async function emitDashboardUpdate(emitter) {
-  const payload = await getDashboardData();
+async function getDashboardData(options = {}) {
+  const { forceFresh = false } = options;
+
+  if (
+    !forceFresh &&
+    dashboardCache.payload &&
+    dashboardCache.expiresAt > Date.now()
+  ) {
+    return dashboardCache.payload;
+  }
+
+  if (!forceFresh && dashboardCache.promise) {
+    return dashboardCache.promise;
+  }
+
+  dashboardCache.promise = Promise.resolve()
+    .then(() => buildDashboardData())
+    .then((payload) => {
+      dashboardCache.payload = payload;
+      dashboardCache.expiresAt = Date.now() + DASHBOARD_CACHE_MS;
+      return payload;
+    })
+    .finally(() => {
+      dashboardCache.promise = null;
+    });
+
+  return dashboardCache.promise;
+}
+
+async function emitDashboardUpdate(emitter, options = {}) {
+  const payload = await getDashboardData(options);
 
   if (emitter && typeof emitter.emit === "function") {
     emitter.emit("update_stats", payload);

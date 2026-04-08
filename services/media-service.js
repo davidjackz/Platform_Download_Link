@@ -85,17 +85,20 @@ async function safeRemove(targetPath) {
   await fs.promises.rm(targetPath, { recursive: true, force: true }).catch(() => {});
 }
 
-async function findDownloadArtifacts(directoryPath) {
+async function findDownloadArtifacts(directoryPath, mediaType) {
   const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
   const files = entries
     .filter((entry) => entry.isFile())
     .map((entry) => path.join(directoryPath, entry.name));
 
   const infoPath = files.find((filePath) => filePath.toLowerCase().endsWith(".info.json")) || null;
-  const mediaPath = files.find((filePath) => {
+  const candidates = files.filter((filePath) => {
     const lowerPath = filePath.toLowerCase();
     return !IGNORED_DOWNLOAD_SUFFIXES.some((suffix) => lowerPath.endsWith(suffix));
   });
+  const preferredExtension = mediaType === "audio" ? ".mp3" : ".mp4";
+  const mediaPath = candidates.find((filePath) => filePath.toLowerCase().endsWith(preferredExtension))
+    || candidates[0];
 
   if (!mediaPath) {
     throw new MediaServiceError("The downloader did not create an output file.", "FILE_NOT_FOUND");
@@ -213,7 +216,7 @@ async function prepareMediaDownload(inputUrl) {
 
   try {
     await runCommand(ytDlpBinary, args);
-    const { mediaPath: filePath, infoPath } = await findDownloadArtifacts(tempDirectory);
+    const { mediaPath: filePath, infoPath } = await findDownloadArtifacts(tempDirectory, mediaType);
     const stats = await fs.promises.stat(filePath);
     const metadata = await readMetadataFromInfoFile(
       infoPath,

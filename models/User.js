@@ -31,4 +31,10 @@ const userSchema = new mongoose.Schema({
   platformStats: { type: platformStatsSchema, default: () => ({}) },
 });
 
+userSchema.index({ username: 1 }, { sparse: true });
+userSchema.index({ isBlocked: 1, lastActive: -1 });
+userSchema.index({ lastActive: -1 });
+userSchema.index({ downloads: -1, lastActive: -1 });
+userSchema.index({ joinedAt: -1 });
+
 module.exports = mongoose.model("User", userSchema);

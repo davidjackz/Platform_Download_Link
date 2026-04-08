@@ -17,4 +17,8 @@ const downloadEventSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now, index: true },
 });
 
+downloadEventSchema.index({ telegramId: 1, createdAt: -1 });
+downloadEventSchema.index({ platform: 1, status: 1, createdAt: -1 });
+downloadEventSchema.index({ status: 1, createdAt: -1 });
+
 module.exports = mongoose.model("DownloadEvent", downloadEventSchema);

@@ -34,6 +34,12 @@ const {
   checkTransactionStatusByMd5,
   isBakongVerificationConfigured,
 } = require("./services/bakong-service");
+const {
+  findReusableMedia,
+  removeReusableMedia,
+  saveReusableMedia,
+  touchReusableMedia,
+} = require("./services/media-cache-service");
 
 require("dotenv").config();
 
@@ -45,12 +51,22 @@ const SUPPORT_LINK = process.env.SUPPORT_LINK || "https://t.me/Tutuvid";
 
 const DONATION_EXPIRY_MS = 3 * 60 * 1000;
 const DONATION_POLL_MS = 3 * 1000;
+const DONATION_POLL_SLOW_MS = 5 * 1000;
+const DONATION_FAST_WINDOW_MS = 45 * 1000;
 const DONATION_PRESETS = {
   usd: [1, 3, 5],
   khr: [500, 1000, 4000, 10000, 20000],
 };
+const DOWNLOAD_CONCURRENCY = Math.max(1, Number(process.env.DOWNLOAD_CONCURRENCY || 2));
+const MAX_PENDING_DOWNLOADS = Math.max(
+  DOWNLOAD_CONCURRENCY,
+  Number(process.env.MAX_PENDING_DOWNLOADS || 20)
+);
 
 const pendingDonations = new Map();
+const pendingDownloadJobs = [];
+const activeDownloadJobs = new Map();
+const reservedDownloadUsers = new Set();
 
 function escapeHtml(value = "") {
   return String(value)
@@ -158,6 +174,63 @@ function buildContactText(language) {
       : "<i>Need help, a bug fix, or a new feature request? Reach out directly.</i>",
     `<b>🔗 ${language === "km" ? "ទាក់ទង Support" : "Contact Support"}:</b> <a href="${escapeHtml(SUPPORT_LINK)}">${escapeHtml(SUPPORT_LINK)}</a>`,
   ].filter(Boolean).join("\n\n");
+}
+
+function getQueueCopy(language, key, variables = {}) {
+  const messages = {
+    queuedTitle: language === "km" ? "កំពុងរង់ចាំជួរ" : "Queued for Processing",
+    queuedBody: language === "km"
+      ? `សំណើរបស់អ្នកស្ថិតនៅជួរលេខ ${variables.position || 1}។`
+      : `Your request is waiting in queue position ${variables.position || 1}.`,
+    busy: language === "km"
+      ? "សូមរង់ចាំឱ្យការទាញយកមុនរបស់អ្នកបញ្ចប់សិន។"
+      : "Please wait until your current download finishes.",
+    full: language === "km"
+      ? "បូតកំពុងមមាញឹកខ្លាំង។ សូមព្យាយាមម្តងទៀតបន្តិចក្រោយ។"
+      : "The bot is busy right now. Please try again in a moment.",
+    reusingCache: language === "km"
+      ? "កំពុងប្រើឯកសារដែលបានរក្សាទុករួច ដើម្បីផ្ញើឱ្យបានលឿនជាងមុន..."
+      : "Reusing a cached Telegram file for faster delivery...",
+    restartingDownload: language === "km"
+      ? "ឯកសារចាស់ប្រើមិនបានទេ។ កំពុងទាញយកឯកសារថ្មី..."
+      : "The cached file is no longer reusable. Downloading a fresh copy...",
+  };
+
+  return messages[key] || "";
+}
+
+function buildQueuedJobMessage(language, position) {
+  return buildProgressMessage(
+    "⏳",
+    getQueueCopy(language, "queuedTitle"),
+    getQueueCopy(language, "queuedBody", { position })
+  );
+}
+
+function extractTelegramMediaReference(message, mediaType) {
+  const media = mediaType === "audio" ? message?.audio : message?.video;
+
+  if (!media?.file_id) {
+    return null;
+  }
+
+  return {
+    fileId: media.file_id,
+    fileUniqueId: media.file_unique_id || null,
+  };
+}
+
+function canReserveDownloadSlot(userId) {
+  if (reservedDownloadUsers.has(userId)) {
+    return { ok: false, reason: "busy" };
+  }
+
+  if (activeDownloadJobs.size + pendingDownloadJobs.length >= MAX_PENDING_DOWNLOADS) {
+    return { ok: false, reason: "full" };
+  }
+
+  reservedDownloadUsers.add(userId);
+  return { ok: true };
 }
 
 function resolveLanguage(userRecord, telegramUser = {}) {
@@ -370,6 +443,223 @@ function runInBackground(task, label) {
     .catch((error) => {
       console.error(`${label} failed:`, error.message || error);
     });
+}
+
+async function sendCachedMedia(bot, job, cachedMedia) {
+  try {
+    await safeEditMessage(
+      bot,
+      job.chatId,
+      job.statusMessageId,
+      buildProgressMessage(
+        "⚡",
+        job.language === "km" ? "កំពុងផ្ញើឯកសារដែលបានរក្សាទុក" : "Sending Cached File",
+        getQueueCopy(job.language, "reusingCache")
+      )
+    );
+
+    if (job.mediaType === "audio") {
+      return await bot.sendAudio(job.chatId, cachedMedia.telegramFileId, {
+        caption: buildCaption(job.language, job.trackedUrl),
+        parse_mode: "HTML",
+        title: cachedMedia.title || undefined,
+        performer: cachedMedia.uploader || undefined,
+      });
+    }
+
+    return await bot.sendVideo(job.chatId, cachedMedia.telegramFileId, {
+      caption: buildCaption(job.language, job.trackedUrl),
+      parse_mode: "HTML",
+      supports_streaming: true,
+    });
+  } catch (error) {
+    const errorMessage = String(error?.message || error || "");
+
+    if (/wrong file identifier|file reference|invalid file|file_id/i.test(errorMessage)) {
+      await removeReusableMedia(cachedMedia._id).catch(() => {});
+      await safeEditMessage(
+        bot,
+        job.chatId,
+        job.statusMessageId,
+        buildProgressMessage(
+          "🔄",
+          job.language === "km" ? "កំពុងទាញយកឯកសារថ្មី" : "Downloading Fresh Copy",
+          getQueueCopy(job.language, "restartingDownload")
+        )
+      );
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function processDownloadJob(bot, job, io) {
+  let preparedMedia = null;
+
+  try {
+    const cachedMedia = await findReusableMedia(job.trackedUrl, job.platform.key, job.mediaType);
+
+    if (cachedMedia) {
+      const cachedMessage = await sendCachedMedia(bot, job, cachedMedia);
+
+      if (cachedMessage) {
+        await safeDeleteMessage(bot, job.chatId, job.statusMessageId);
+
+        runInBackground(async () => {
+          await touchReusableMedia(cachedMedia._id);
+          await recordSuccessfulDownload(job.sender, {
+            sourceUrl: job.trackedUrl,
+            platform: job.platform.key,
+            mediaType: job.mediaType,
+            title: cachedMedia.title,
+            fileName: cachedMedia.fileName,
+            fileSizeBytes: cachedMedia.fileSizeBytes,
+            language: job.language,
+          });
+          syncDashboard(io);
+        }, "Cached media tracking");
+
+        return;
+      }
+    }
+
+    await safeEditMessage(
+      bot,
+      job.chatId,
+      job.statusMessageId,
+      [
+        getProgressCopy(job.language, "analyzing"),
+        "",
+        getProgressCopy(job.language, job.mediaType === "audio" ? "downloadingAudio" : "downloadingVideo"),
+      ].join("\n")
+    );
+
+    preparedMedia = await prepareMediaDownload(job.trackedUrl);
+
+    await safeEditMessage(
+      bot,
+      job.chatId,
+      job.statusMessageId,
+      getProgressCopy(job.language, preparedMedia.mediaType === "audio" ? "uploadingAudio" : "uploadingVideo")
+    );
+
+    await bot.sendChatAction(
+      job.chatId,
+      preparedMedia.mediaType === "audio" ? "upload_audio" : "upload_video"
+    );
+
+    let sentMessage;
+    if (preparedMedia.mediaType === "audio") {
+      sentMessage = await bot.sendAudio(job.chatId, preparedMedia.filePath, {
+        caption: buildCaption(job.language, job.trackedUrl),
+        parse_mode: "HTML",
+        title: preparedMedia.title || undefined,
+        performer: preparedMedia.uploader || undefined,
+      });
+    } else {
+      sentMessage = await bot.sendVideo(job.chatId, preparedMedia.filePath, {
+        caption: buildCaption(job.language, job.trackedUrl),
+        parse_mode: "HTML",
+        supports_streaming: true,
+      });
+    }
+
+    await safeDeleteMessage(bot, job.chatId, job.statusMessageId);
+
+    const telegramMedia = extractTelegramMediaReference(sentMessage, preparedMedia.mediaType);
+    if (telegramMedia?.fileId) {
+      runInBackground(async () => {
+        await saveReusableMedia({
+          url: job.trackedUrl,
+          platform: preparedMedia.platform,
+          mediaType: preparedMedia.mediaType,
+          telegramFileId: telegramMedia.fileId,
+          telegramFileUniqueId: telegramMedia.fileUniqueId,
+          title: preparedMedia.title,
+          uploader: preparedMedia.uploader,
+          fileName: preparedMedia.fileName,
+          fileSizeBytes: preparedMedia.fileSizeBytes,
+        });
+      }, "Reusable media cache save");
+    }
+
+    runInBackground(async () => {
+      await recordSuccessfulDownload(job.sender, {
+        sourceUrl: job.trackedUrl,
+        platform: preparedMedia.platform,
+        mediaType: preparedMedia.mediaType,
+        title: preparedMedia.title,
+        fileName: preparedMedia.fileName,
+        fileSizeBytes: preparedMedia.fileSizeBytes,
+        language: job.language,
+      });
+      syncDashboard(io);
+    }, "Successful download tracking");
+  } catch (error) {
+    console.error(error);
+
+    runInBackground(async () => {
+      await recordFailedDownload(job.sender, {
+        sourceUrl: job.trackedUrl,
+        platform: job.platform.key,
+        mediaType: job.mediaType,
+        title: `${job.platform.label} request failed`,
+        fileName: preparedMedia?.fileName || null,
+        fileSizeBytes: preparedMedia?.fileSizeBytes || null,
+        language: job.language,
+        errorMessage: error.message || String(error),
+      });
+      syncDashboard(io);
+    }, "Failed download tracking");
+
+    const errorMessage = resolveErrorMessage(job.language, error);
+    const edited = await safeEditMessage(
+      bot,
+      job.chatId,
+      job.statusMessageId,
+      buildInlineNotice("⚠️", errorMessage)
+    );
+
+    if (!edited) {
+      await bot.sendMessage(job.chatId, buildInlineNotice("⚠️", errorMessage), { parse_mode: "HTML" });
+    }
+  } finally {
+    if (preparedMedia?.cleanup) {
+      await preparedMedia.cleanup();
+    }
+
+    syncDashboard(io);
+  }
+}
+
+function pumpDownloadQueue(bot, io) {
+  while (activeDownloadJobs.size < DOWNLOAD_CONCURRENCY && pendingDownloadJobs.length > 0) {
+    const job = pendingDownloadJobs.shift();
+    activeDownloadJobs.set(job.id, job);
+
+    runInBackground(async () => {
+      try {
+        await processDownloadJob(bot, job, io);
+      } finally {
+        activeDownloadJobs.delete(job.id);
+        reservedDownloadUsers.delete(job.userId);
+        pumpDownloadQueue(bot, io);
+      }
+    }, `Download job ${job.id}`);
+  }
+}
+
+function queueDownloadJob(bot, job, io) {
+  const isQueued = activeDownloadJobs.size >= DOWNLOAD_CONCURRENCY || pendingDownloadJobs.length > 0;
+  const position = pendingDownloadJobs.length + 1;
+  pendingDownloadJobs.push(job);
+  pumpDownloadQueue(bot, io);
+
+  return {
+    position,
+    isQueued,
+  };
 }
 
 function drawRoundedRect(ctx, x, y, width, height, radius) {
@@ -840,20 +1130,39 @@ async function runDonationStatusCheck(bot, md5, io) {
 }
 
 function scheduleDonationCheck(bot, session, io) {
-  const timer = isBakongVerificationConfigured()
-    ? setInterval(async () => {
-        const result = await runDonationStatusCheck(bot, session.md5, io);
+  const scheduleNextPoll = () => {
+    const latest = pendingDonations.get(session.md5);
+    if (!latest) {
+      return null;
+    }
 
-        if (["success", "failed", "expired", "unsupported"].includes(result.state)) {
-          clearDonationSession(session.md5);
-          return;
-        }
+    const elapsed = Date.now() - latest.startedAt;
+    const nextDelay = elapsed >= DONATION_FAST_WINDOW_MS ? DONATION_POLL_SLOW_MS : DONATION_POLL_MS;
 
-        if (result.state === "auth_error") {
-          stopDonationPolling(session.md5);
-        }
-      }, DONATION_POLL_MS)
-    : null;
+    return setTimeout(async () => {
+      const result = await runDonationStatusCheck(bot, session.md5, io);
+
+      if (["success", "failed", "expired", "unsupported"].includes(result.state)) {
+        clearDonationSession(session.md5);
+        return;
+      }
+
+      if (result.state === "auth_error") {
+        stopDonationPolling(session.md5);
+        return;
+      }
+
+      const current = pendingDonations.get(session.md5);
+      if (current) {
+        pendingDonations.set(session.md5, {
+          ...current,
+          timer: scheduleNextPoll(),
+        });
+      }
+    }, nextDelay);
+  };
+
+  const timer = isBakongVerificationConfigured() ? scheduleNextPoll() : null;
 
   const expiryDelay = Math.max(session.expiresAt - Date.now(), 0);
   const expiryTimer = setTimeout(async () => {
@@ -867,6 +1176,7 @@ function scheduleDonationCheck(bot, session, io) {
 
   pendingDonations.set(session.md5, {
     ...session,
+    startedAt: session.startedAt || Date.now(),
     timer,
     expiryTimer,
     checking: false,
@@ -1058,106 +1368,68 @@ const setupBot = (token, domain, createTempLink, io) => {
       return;
     }
 
+    const reservation = canReserveDownloadSlot(sender.id);
+    if (!reservation.ok) {
+      await bot.sendMessage(
+        chatId,
+        buildInlineNotice(
+          reservation.reason === "busy" ? "⏳" : "🚦",
+          getQueueCopy(language, reservation.reason)
+        ),
+        { parse_mode: "HTML" }
+      );
+      await syncDashboard(io);
+      return;
+    }
+
     const mediaType = inferMediaType(platform.key);
-    const statusMessage = await bot.sendMessage(
-      chatId,
-      [
-        getProgressCopy(language, "analyzing"),
-        "",
-        getProgressCopy(language, mediaType === "audio" ? "downloadingAudio" : "downloadingVideo"),
-      ].join("\n"),
-      { parse_mode: "HTML" }
-    );
-
-    runInBackground(async () => {
-      await recordDownloadRequest(sender, {
-        sourceUrl: trackedUrl,
-        platform: platform.key,
-        language,
-      });
-      syncDashboard(io);
-    }, "Download request tracking");
-
-    let preparedMedia = null;
 
     try {
-      preparedMedia = await prepareMediaDownload(trackedUrl);
-
-      await safeEditMessage(
-        bot,
+      const statusMessage = await bot.sendMessage(
         chatId,
-        statusMessage.message_id,
-        getProgressCopy(language, preparedMedia.mediaType === "audio" ? "uploadingAudio" : "uploadingVideo")
+        [
+          getProgressCopy(language, "analyzing"),
+          "",
+          getProgressCopy(language, mediaType === "audio" ? "downloadingAudio" : "downloadingVideo"),
+        ].join("\n"),
+        { parse_mode: "HTML" }
       );
 
-      await bot.sendChatAction(
-        chatId,
-        preparedMedia.mediaType === "audio" ? "upload_audio" : "upload_video"
-      );
-
-      if (preparedMedia.mediaType === "audio") {
-        await bot.sendAudio(chatId, preparedMedia.filePath, {
-          caption: buildCaption(language, trackedUrl),
-          parse_mode: "HTML",
-          title: preparedMedia.title || undefined,
-          performer: preparedMedia.uploader || undefined,
-        });
-      } else {
-        await bot.sendVideo(chatId, preparedMedia.filePath, {
-          caption: buildCaption(language, trackedUrl),
-          parse_mode: "HTML",
-          supports_streaming: true,
-        });
-      }
-
-      await bot.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
-
       runInBackground(async () => {
-        await recordSuccessfulDownload(sender, {
-          sourceUrl: trackedUrl,
-          platform: preparedMedia.platform,
-          mediaType: preparedMedia.mediaType,
-          title: preparedMedia.title,
-          fileName: preparedMedia.fileName,
-          fileSizeBytes: preparedMedia.fileSizeBytes,
-          language,
-        });
-        syncDashboard(io);
-      }, "Successful download tracking");
-    } catch (error) {
-      console.error(error);
-
-      runInBackground(async () => {
-        await recordFailedDownload(sender, {
+        await recordDownloadRequest(sender, {
           sourceUrl: trackedUrl,
           platform: platform.key,
-          mediaType,
-          title: `${platform.label} request failed`,
-          fileName: preparedMedia?.fileName || null,
-          fileSizeBytes: preparedMedia?.fileSizeBytes || null,
           language,
-          errorMessage: error.message || String(error),
         });
         syncDashboard(io);
-      }, "Failed download tracking");
+      }, "Download request tracking");
 
-      const errorMessage = resolveErrorMessage(language, error);
-      const edited = await safeEditMessage(
-        bot,
+      const queuedJob = queueDownloadJob(bot, {
+        id: `${sender.id}-${Date.now()}`,
+        userId: sender.id,
         chatId,
-        statusMessage.message_id,
-        buildInlineNotice("⚠️", errorMessage)
-      );
+        sender,
+        trackedUrl,
+        platform,
+        language,
+        mediaType,
+        statusMessageId: statusMessage.message_id,
+      }, io);
 
-      if (!edited) {
-        await bot.sendMessage(chatId, buildInlineNotice("⚠️", errorMessage), { parse_mode: "HTML" });
+      if (queuedJob.isQueued) {
+        await safeEditMessage(
+          bot,
+          chatId,
+          statusMessage.message_id,
+          buildQueuedJobMessage(language, queuedJob.position)
+        );
       }
-    } finally {
-      if (preparedMedia?.cleanup) {
-        await preparedMedia.cleanup();
-      }
-
-      syncDashboard(io);
+    } catch (error) {
+      reservedDownloadUsers.delete(sender.id);
+      console.error("Failed to queue download job:", error);
+      await bot.sendMessage(chatId, buildInlineNotice("⚠️", t(language, "status.genericError")), {
+        parse_mode: "HTML",
+      }).catch(() => {});
     }
   });
 

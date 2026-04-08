@@ -102,7 +102,7 @@ async function setUserBlockStatus(req, res, isBlocked) {
     return;
   }
 
-  await emitDashboardUpdate(io);
+  await emitDashboardUpdate(io, { forceFresh: true });
   res.json({ ok: true, telegramId, isBlocked });
 }
 

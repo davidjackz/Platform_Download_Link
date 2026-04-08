@@ -25,4 +25,8 @@ const donationEventSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now, index: true },
 });
 
+donationEventSchema.index({ telegramId: 1, createdAt: -1 });
+donationEventSchema.index({ status: 1, createdAt: -1 });
+donationEventSchema.index({ currencyCode: 1, status: 1, createdAt: -1 });
+
 module.exports = mongoose.model("DonationEvent", donationEventSchema);
